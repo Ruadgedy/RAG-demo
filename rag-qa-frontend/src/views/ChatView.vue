@@ -1,27 +1,93 @@
 <template>
-  <div class="chat-view">
+  <div class="app-container">
     <div class="sidebar">
       <div class="sidebar-header">
         <h2>知识库</h2>
-        <button class="btn-primary">新建</button>
+        <button class="btn-new" @click="showCreateModal = true">
+          <span>+</span> 新建
+        </button>
       </div>
       <div class="knowledge-list">
-        <div class="knowledge-item" v-for="kb in knowledgeBases" :key="kb.id">
-          <span>{{ kb.name }}</span>
+        <div 
+          v-for="kb in knowledgeBases" 
+          :key="kb.id"
+          class="knowledge-item"
+          :class="{ active: currentKb?.id === kb.id }"
+          @click="selectKnowledgeBase(kb)"
+        >
+          <div class="kb-icon">📚</div>
+          <div class="kb-info">
+            <div class="kb-name">{{ kb.name }}</div>
+            <div class="kb-time">{{ formatTime(kb.createdAt) }}</div>
+          </div>
+        </div>
+        <div v-if="knowledgeBases.length === 0" class="empty-tip">
+          暂无知识库，点击新建
         </div>
       </div>
     </div>
+    
     <div class="main">
       <div class="chat-area">
-        <div class="messages">
-          <div class="message assistant">
-            <div class="avatar">AI</div>
-            <div class="content">您好！我是RAG智能问答助手。请选择或创建一个知识库，然后开始提问。</div>
+        <div class="messages" ref="messagesRef">
+          <div v-if="!currentKb" class="welcome-tip">
+            <div class="welcome-icon">🤖</div>
+            <h3>欢迎使用RAG智能问答</h3>
+            <p>请先选择或创建一个知识库开始使用</p>
           </div>
+          <template v-else>
+            <div 
+              v-for="(msg, index) in messages" 
+              :key="index"
+              class="message"
+              :class="msg.role"
+            >
+              <div class="avatar">{{ msg.role === 'user' ? '你' : 'AI' }}</div>
+              <div class="content" v-html="renderMarkdown(msg.content)"></div>
+            </div>
+            <div v-if="loading" class="message assistant">
+              <div class="avatar">AI</div>
+              <div class="content loading">
+                <span class="dot">.</span>
+                <span class="dot">.</span>
+                <span class="dot">.</span>
+              </div>
+            </div>
+          </template>
         </div>
-        <div class="input-area">
-          <textarea placeholder="请输入您的问题..."></textarea>
-          <button class="btn-send">发送</button>
+        
+        <div class="input-area" v-if="currentKb">
+          <textarea 
+            v-model="inputMessage" 
+            placeholder="请输入您的问题..."
+            @keydown.enter.exact.prevent="sendMessage"
+            :disabled="loading"
+          ></textarea>
+          <button class="btn-send" @click="sendMessage" :disabled="loading || !inputMessage.trim()">
+            发送
+          </button>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 创建知识库弹窗 -->
+    <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>新建知识库</h3>
+          <button class="btn-close" @click="showCreateModal = false">×</button>
+        </div>
+        <div class="modal-body">
+          <input 
+            v-model="newKbName" 
+            type="text" 
+            placeholder="输入知识库名称"
+            @keydown.enter="createKnowledgeBase"
+          />
+        </div>
+        <div class="modal-footer">
+          <button class="btn-cancel" @click="showCreateModal = false">取消</button>
+          <button class="btn-confirm" @click="createKnowledgeBase" :disabled="!newKbName.trim()">创建</button>
         </div>
       </div>
     </div>
@@ -29,52 +95,152 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted, nextTick } from 'vue'
+import axios from 'axios'
+import { marked } from 'marked'
 
-const knowledgeBases = ref([
-  { id: 1, name: '技术文档' },
-  { id: 2, name: '产品说明' }
-])
+const knowledgeBases = ref([])
+const currentKb = ref(null)
+const messages = ref([])
+const inputMessage = ref('')
+const loading = ref(false)
+const messagesRef = ref(null)
+const showCreateModal = ref(false)
+const newKbName = ref('')
+
+const API_BASE = 'http://localhost:8080/api'
+
+const loadKnowledgeBases = async () => {
+  try {
+    const res = await axios.get(`${API_BASE}/knowledge-bases`)
+    knowledgeBases.value = res.data
+    if (knowledgeBases.value.length > 0 && !currentKb.value) {
+      selectKnowledgeBase(knowledgeBases.value[0])
+    }
+  } catch (e) {
+    console.error('加载知识库失败:', e)
+  }
+}
+
+const selectKnowledgeBase = (kb) => {
+  currentKb.value = kb
+  messages.value = []
+}
+
+const createKnowledgeBase = async () => {
+  if (!newKbName.value.trim()) return
+  try {
+    const res = await axios.post(`${API_BASE}/knowledge-bases`, {
+      name: newKbName.value
+    })
+    knowledgeBases.value.push(res.data)
+    selectKnowledgeBase(res.data)
+    showCreateModal.value = false
+    newKbName.value = ''
+  } catch (e) {
+    alert('创建失败: ' + e.message)
+  }
+}
+
+const sendMessage = async () => {
+  if (!inputMessage.value.trim() || loading.value || !currentKb.value) return
+  
+  const userMsg = inputMessage.value
+  messages.value.push({ role: 'user', content: userMsg })
+  inputMessage.value = ''
+  loading.value = true
+  
+  await nextTick()
+  scrollToBottom()
+  
+  try {
+    const res = await axios.post(`${API_BASE}/chat`, {
+      message: userMsg,
+      knowledgeBaseId: currentKb.value.id,
+      history: messages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
+    })
+    messages.value.push({ role: 'assistant', content: res.data })
+  } catch (e) {
+    messages.value.push({ role: 'assistant', content: '抱歉，请求失败: ' + e.message })
+  }
+  
+  loading.value = false
+  await nextTick()
+  scrollToBottom()
+}
+
+const scrollToBottom = () => {
+  if (messagesRef.value) {
+    messagesRef.value.scrollTop = messagesRef.value.scrollHeight
+  }
+}
+
+const formatTime = (time) => {
+  if (!time) return ''
+  return new Date(time).toLocaleDateString('zh-CN')
+}
+
+const renderMarkdown = (content) => {
+  return marked(content || '')
+}
+
+onMounted(() => {
+  loadKnowledgeBases()
+})
 </script>
 
-<style scoped>
-.chat-view {
+<style>
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.app-container {
   display: flex;
-  width: 100%;
-  height: 100%;
+  width: 100vw;
+  height: 100vh;
+  background: #f5f5f5;
 }
 
 .sidebar {
-  width: 240px;
-  background: var(--color-bg-secondary);
-  border-right: 1px solid var(--color-border);
+  width: 260px;
+  background: #fff;
+  border-right: 1px solid #e5e7eb;
   display: flex;
   flex-direction: column;
 }
 
 .sidebar-header {
-  padding: var(--space-md);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  padding: 20px;
+  border-bottom: 1px solid #e5e7eb;
 }
 
 .sidebar-header h2 {
-  font: var(--font-heading-2);
+  font-size: 18px;
+  font-weight: 600;
+  color: #111827;
+  margin-bottom: 12px;
 }
 
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
+.btn-new {
+  width: 100%;
+  padding: 10px;
+  background: #3b82f6;
+  color: #fff;
   border: none;
-  padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-sm);
-  font: var(--font-button);
+  border-radius: 8px;
+  font-size: 14px;
   cursor: pointer;
+  transition: background 0.2s;
 }
 
-.btn-primary:hover {
-  background: var(--color-primary-hover);
+.btn-new:hover {
+  background: #2563eb;
 }
 
 .knowledge-list {
@@ -83,19 +249,51 @@ const knowledgeBases = ref([
 }
 
 .knowledge-item {
-  padding: var(--space-sm) var(--space-md);
+  display: flex;
+  align-items: center;
+  padding: 14px 20px;
   cursor: pointer;
-  font: var(--font-body);
+  transition: background 0.2s;
+  border-left: 3px solid transparent;
 }
 
 .knowledge-item:hover {
-  background: var(--color-bg-hover);
+  background: #f3f4f6;
+}
+
+.knowledge-item.active {
+  background: #dbeafe;
+  border-left-color: #3b82f6;
+}
+
+.kb-icon {
+  font-size: 20px;
+  margin-right: 12px;
+}
+
+.kb-name {
+  font-size: 14px;
+  color: #374151;
+}
+
+.kb-time {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+
+.empty-tip {
+  padding: 40px 20px;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 14px;
 }
 
 .main {
   flex: 1;
   display: flex;
   flex-direction: column;
+  background: #fff;
 }
 
 .chat-area {
@@ -106,61 +304,239 @@ const knowledgeBases = ref([
 
 .messages {
   flex: 1;
-  padding: var(--space-md);
+  padding: 20px;
   overflow-y: auto;
+}
+
+.welcome-tip {
+  text-align: center;
+  padding-top: 100px;
+}
+
+.welcome-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.welcome-tip h3 {
+  font-size: 20px;
+  color: #111827;
+  margin-bottom: 8px;
+}
+
+.welcome-tip p {
+  color: #6b7280;
+  font-size: 14px;
 }
 
 .message {
   display: flex;
-  gap: var(--space-sm);
-  margin-bottom: var(--space-md);
+  margin-bottom: 20px;
 }
 
-.message.assistant .content {
-  background: var(--color-bg-primary);
-  border: 1px solid var(--color-border);
+.message.user {
+  flex-direction: row-reverse;
 }
 
-.avatar {
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-full);
-  background: var(--color-bg-hover);
+.message .avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #e5e7eb;
   display: flex;
   align-items: center;
   justify-content: center;
-  font: var(--font-body-small);
+  font-size: 12px;
+  color: #6b7280;
+  flex-shrink: 0;
 }
 
-.content {
-  padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-md);
+.message.assistant .avatar {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.message .content {
   max-width: 70%;
-  font: var(--font-body);
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0 12px;
+}
+
+.message.user .content {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.message.assistant .content {
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.message.assistant .content code {
+  background: #e5e7eb;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.message.assistant .content pre {
+  background: #1f2937;
+  color: #e5e7eb;
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.loading .dot {
+  animation: blink 1.4s infinite;
+}
+
+.loading .dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.loading .dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes blink {
+  0%, 60%, 100% { opacity: 0; }
+  30% { opacity: 1; }
 }
 
 .input-area {
-  padding: var(--space-md);
-  border-top: 1px solid var(--color-border);
+  padding: 16px 20px;
+  border-top: 1px solid #e5e7eb;
   display: flex;
-  gap: var(--space-sm);
+  gap: 12px;
 }
 
 .input-area textarea {
   flex: 1;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-sm);
-  font: var(--font-body);
+  padding: 12px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 14px;
   resize: none;
+  font-family: inherit;
+}
+
+.input-area textarea:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 
 .btn-send {
-  background: var(--color-primary);
-  color: white;
+  padding: 12px 24px;
+  background: #3b82f6;
+  color: #fff;
   border: none;
-  padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-sm);
+  border-radius: 8px;
+  font-size: 14px;
   cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-send:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.btn-send:disabled {
+  background: #93c5fd;
+  cursor: not-allowed;
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  background: #fff;
+  border-radius: 12px;
+  width: 400px;
+  overflow: hidden;
+}
+
+.modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.btn-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: #9ca3af;
+}
+
+.modal-body {
+  padding: 20px;
+}
+
+.modal-body input {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.modal-body input:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.modal-footer {
+  padding: 16px 20px;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.btn-cancel, .btn-confirm {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn-cancel {
+  background: #f3f4f6;
+  border: none;
+  color: #374151;
+}
+
+.btn-confirm {
+  background: #3b82f6;
+  border: none;
+  color: #fff;
+}
+
+.btn-confirm:disabled {
+  background: #93c5fd;
+  cursor: not-allowed;
 }
 </style>

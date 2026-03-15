@@ -155,7 +155,7 @@
       "title": "Vue3前端项目初始化",
       "description": "创建Vue3 + Vite项目，配置路由、状态管理、Axios",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given 前端项目代码, when 运行 npm run dev, then 前端启动成功，端口5173可访问"
       ],
@@ -169,7 +169,7 @@
       "title": "前端布局组件",
       "description": "实现左侧知识库列表 + 右侧聊天区域的布局",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "[devtools] Given 前端页面加载, when 打开应用, then 显示左侧边栏（240px）+ 右侧内容区"
       ],
@@ -183,7 +183,7 @@
       "title": "知识库列表组件",
       "description": "前端显示知识库列表，支持点击切换",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "[devtools] Given 页面加载, when 打开知识库管理页, then 显示知识库列表，每项显示名称和文档数",
         "[devtools] Given 知识库列表, when 点击某个知识库, then 切换为当前活跃知识库"
@@ -198,7 +198,7 @@
       "title": "聊天界面组件",
       "description": "实现消息气泡、输入框、发送按钮",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "[devtools] Given 聊天界面, when 用户发送消息, then 消息显示在右侧气泡中",
         "[devtools] Given AI响应, when 收到回答, then 回答显示在左侧气泡中，支持Markdown渲染"
