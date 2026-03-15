@@ -213,7 +213,7 @@
       "title": "文档上传功能",
       "description": "实现文档上传API和前端组件，支持PDF/Word/TXT",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given 知识库, when 上传PDF文件, then 文件上传成功，状态变为PROCESSING",
         "[devtools] Given 上传页面, when 选择文件并点击上传, then 显示上传进度，上传成功后文件出现在列表中"
@@ -228,7 +228,7 @@
       "title": "文档解析与向量化",
       "description": "后端自动解析上传的文档并存储向量",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given PDF文件上传成功, when 解析完成, then 文本内容被切分并向量化，存入Chroma",
         "Given 解析过程, when 出现错误, then 文档状态变为FAILED"
@@ -242,7 +242,7 @@
       "title": "知识库删除功能",
       "description": "实现删除知识库及其所有关联数据",
       "priority": "medium",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given 知识库存在, when DELETE /api/knowledge-bases/{id}, then 知识库及其文档和向量数据被删除"
       ],
@@ -255,7 +255,7 @@
       "title": "对话历史记录",
       "description": "实现多轮对话的上下文记忆",
       "priority": "medium",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given 已有问答历史, when 继续提问, then 系统结合历史上下文生成回答"
       ],
@@ -268,7 +268,7 @@
       "title": "参考文档展示",
       "description": "问答结果展示引用的源文档片段",
       "priority": "medium",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given AI返回回答, when 回答生成完成, then 回答下方显示引用的文档来源"
       ],
