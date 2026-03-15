@@ -87,7 +87,7 @@
       "title": "知识库创建API",
       "description": "实现POST /api/knowledge-bases接口，创建新的知识库",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given 空的系统, when POST /api/knowledge-bases with {name: '测试库'}, then 返回201，body包含id和name",
         "Given 已存在的知识库名称, when POST /api/knowledge-bases with 相同名称, then 返回400或409错误"
@@ -101,7 +101,7 @@
       "title": "知识库列表API",
       "description": "实现GET /api/knowledge-bases接口，获取所有知识库列表",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given 系统中有多个知识库, when GET /api/knowledge-bases, then 返回200，body是知识库数组",
         "Given 系统中无知识库, when GET /api/knowledge-bases, then 返回空数组[]"
