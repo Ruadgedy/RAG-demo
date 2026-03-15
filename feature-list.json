@@ -74,7 +74,7 @@
       "title": "Spring Boot项目初始化",
       "description": "创建Spring Boot项目，配置Spring AI、Chroma等依赖",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given 新项目环境, when 运行 mvn spring-boot:run, then 应用启动成功，端口8080可访问"
       ],
