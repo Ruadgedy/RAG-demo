@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 10/15 · Last: Feature #10 (聊天界面组件) · Next: Feature #11 (文档上传功能)
+Progress: 15/15 · Last: Feature #15 (参考文档展示) · Next: All features completed!
 
 ---
 
