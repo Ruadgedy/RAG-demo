@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 0/15 · Last: — · Next: Feature #1 (Spring Boot项目初始化)
+Progress: 1/15 · Last: Feature #1 (Spring Boot项目初始化) · Next: Feature #2 (知识库创建API)
 
 ---
 
@@ -16,11 +16,20 @@ Progress: 0/15 · Last: — · Next: Feature #1 (Spring Boot项目初始化)
 - ✅ 项目脚手架 (rag-qa-backend/, rag-qa-frontend/)
 - ✅ 配置文件 (feature-list.json, .env.example, init.sh, env-guide.md, long-task-guide.md)
 
-**技术栈：**
-- 后端: Spring Boot 3.2 + Spring AI 1.0.0-M1
-- 前端: Vue 3.4 + Vite 5 + Pinia
-- 向量库: Chroma
-- LLM: OpenAI兼容API (Minimax/硅基流动)
-
 **下一步：**
 - 开始实现Feature #1: Spring Boot项目初始化
+
+### Session 1 — Feature #1 完成 (2026-03-15)
+
+**完成内容：**
+- ✅ 修复pom.xml依赖配置，使用Spring AI 1.0.0-M6
+- ✅ 添加Maven settings.xml解决阿里云mirror问题
+- ✅ 添加spring-boot-starter-actuator
+- ✅ 应用成功启动在8080端口
+- ✅ 验证通过：应用可访问
+
+**技术栈更新：**
+- 后端: Spring Boot 3.2 + Spring AI 1.0.0-M6
+
+**下一步：**
+- Feature #2: 知识库创建API
