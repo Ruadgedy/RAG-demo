@@ -20,6 +20,13 @@
             <div class="kb-name">{{ kb.name }}</div>
             <div class="kb-time">{{ formatTime(kb.createdAt) }}</div>
           </div>
+          <button 
+            class="btn-upload" 
+            @click.stop="showUploadModal = true; uploadKbId = kb.id"
+            title="上传文档"
+          >
+            📎
+          </button>
         </div>
         <div v-if="knowledgeBases.length === 0" class="empty-tip">
           暂无知识库，点击新建
@@ -91,6 +98,27 @@
         </div>
       </div>
     </div>
+    
+    <!-- 上传文档弹窗 -->
+    <div v-if="showUploadModal" class="modal-overlay" @click.self="showUploadModal = false">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>上传文档</h3>
+          <button class="btn-close" @click="showUploadModal = false">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="upload-tip">支持 PDF、Word(.docx)、TXT 格式</p>
+          <input type="file" accept=".pdf,.docx,.txt" @change="handleFileSelect" />
+          <p v-if="uploadFile" class="file-name">{{ uploadFile.name }}</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-cancel" @click="showUploadModal = false">取消</button>
+          <button class="btn-confirm" @click="uploadDocument" :disabled="!uploadFile || uploading">
+            {{ uploading ? '上传中...' : '上传' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -107,6 +135,10 @@ const loading = ref(false)
 const messagesRef = ref(null)
 const showCreateModal = ref(false)
 const newKbName = ref('')
+const showUploadModal = ref(false)
+const uploadKbId = ref(null)
+const uploadFile = ref(null)
+const uploading = ref(false)
 
 const API_BASE = 'http://localhost:8080/api'
 
@@ -140,6 +172,35 @@ const createKnowledgeBase = async () => {
   } catch (e) {
     alert('创建失败: ' + e.message)
   }
+}
+
+const handleFileSelect = (event) => {
+  const file = event.target.files[0]
+  if (file) {
+    uploadFile.value = file
+  }
+}
+
+const uploadDocument = async () => {
+  if (!uploadFile.value || !uploadKbId.value) return
+  
+  uploading.value = true
+  const formData = new FormData()
+  formData.append('file', uploadFile.value)
+  
+  try {
+    await axios.post(`${API_BASE}/knowledge-bases/${uploadKbId.value}/documents`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+    alert('文档上传成功！')
+    showUploadModal.value = false
+    uploadFile.value = null
+    uploadKbId.value = null
+  } catch (e) {
+    alert('上传失败: ' + e.message)
+  }
+  
+  uploading.value = false
 }
 
 const sendMessage = async () => {
@@ -280,6 +341,19 @@ body {
   font-size: 12px;
   color: #9ca3af;
   margin-top: 2px;
+}
+
+.btn-upload {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  opacity: 0.5;
+  padding: 4px;
+}
+
+.btn-upload:hover {
+  opacity: 1;
 }
 
 .empty-tip {
@@ -538,5 +612,21 @@ body {
 .btn-confirm:disabled {
   background: #93c5fd;
   cursor: not-allowed;
+}
+
+.upload-tip {
+  font-size: 12px;
+  color: #6b7280;
+  margin-bottom: 12px;
+}
+
+.modal-body input[type="file"] {
+  padding: 8px 0;
+}
+
+.file-name {
+  margin-top: 8px;
+  font-size: 14px;
+  color: #374151;
 }
 </style>
