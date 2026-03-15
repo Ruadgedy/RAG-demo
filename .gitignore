@@ -1,0 +1,12 @@
+.env
+.env.local
+node_modules/
+dist/
+target/
+*.log
+.DS_Store
+*.iml
+.idea/
+.vscode/
+uploads/
+chroma-data/

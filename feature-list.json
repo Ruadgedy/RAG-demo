@@ -1,0 +1,280 @@
+{
+  "project": "rag-qa",
+  "created": "2026-03-15",
+  "tech_stack": {
+    "language": "java",
+    "test_framework": "junit",
+    "coverage_tool": "jacoco",
+    "mutation_tool": "pitest"
+  },
+  "quality_gates": {
+    "line_coverage_min": 90,
+    "branch_coverage_min": 80,
+    "mutation_score_min": 80
+  },
+  "constraints": [
+    "后端必须使用Spring AI框架",
+    "前端必须使用Vue3框架",
+    "向量数据库使用Chroma",
+    "MVP版本不支持用户登录认证",
+    "部署环境为本地服务器",
+    "需要LLM API（开源模型：Minimax/硅基流动）"
+  ],
+  "assumptions": [
+    "用户具备基本的电脑操作能力",
+    "本地服务器有足够的磁盘空间存储文档和向量数据",
+    "网络环境可以访问LLM API服务"
+  ],
+  "required_configs": [
+    {
+      "name": "LLM API Key",
+      "type": "env",
+      "key": "OPENAI_API_KEY",
+      "description": "LLM服务商的API密钥",
+      "required_by": [4, 5, 6],
+      "check_hint": "从Minimax或硅基流动获取API Key，设置为环境变量"
+    },
+    {
+      "name": "LLM Base URL",
+      "type": "env",
+      "key": "OPENAI_BASE_URL",
+      "description": "LLM API的基础URL",
+      "required_by": [4, 5, 6],
+      "check_hint": "例如 https://api.minimax.chat/v1 或硅基流动的API地址"
+    },
+    {
+      "name": "LLM Model",
+      "type": "env",
+      "key": "OPENAI_MODEL",
+      "description": "使用的LLM模型名称",
+      "required_by": [4, 5, 6],
+      "check_hint": "例如 gpt-3.5-turbo 或对应的开源模型"
+    },
+    {
+      "name": "Chroma存储路径",
+      "type": "env",
+      "key": "CHROMA_PERSIST_DIR",
+      "description": "Chroma向量数据库的持久化目录",
+      "required_by": [2, 3, 4],
+      "check_hint": "设置为本地目录路径，如 ./chroma-data"
+    },
+    {
+      "name": "文件存储目录",
+      "type": "env",
+      "key": "FILE_UPLOAD_DIR",
+      "description": "上传文档的存储目录",
+      "required_by": [2, 3],
+      "check_hint": "设置为本地目录路径，如 ./uploads"
+    }
+  ],
+  "features": [
+    {
+      "id": 1,
+      "category": "core",
+      "title": "Spring Boot项目初始化",
+      "description": "创建Spring Boot项目，配置Spring AI、Chroma等依赖",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "Given 新项目环境, when 运行 mvn spring-boot:run, then 应用启动成功，端口8080可访问"
+      ],
+      "dependencies": [],
+      "ui": false
+    },
+    {
+      "id": 2,
+      "category": "core",
+      "title": "知识库创建API",
+      "description": "实现POST /api/knowledge-bases接口，创建新的知识库",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "Given 空的系统, when POST /api/knowledge-bases with {name: '测试库'}, then 返回201，body包含id和name",
+        "Given 已存在的知识库名称, when POST /api/knowledge-bases with 相同名称, then 返回400或409错误"
+      ],
+      "dependencies": [1],
+      "ui": false
+    },
+    {
+      "id": 3,
+      "category": "core",
+      "title": "知识库列表API",
+      "description": "实现GET /api/knowledge-bases接口，获取所有知识库列表",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "Given 系统中有多个知识库, when GET /api/knowledge-bases, then 返回200，body是知识库数组",
+        "Given 系统中无知识库, when GET /api/knowledge-bases, then 返回空数组[]"
+      ],
+      "dependencies": [1],
+      "ui": false
+    },
+    {
+      "id": 4,
+      "category": "core",
+      "title": "RAG检索引擎",
+      "description": "实现基于Chroma的向量检索和LLM生成能力",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "Given 知识库中有文档和向量, when 执行相似度检索, then 返回相关文档片段",
+        "Given 检索结果, when 调用LLM生成回答, then 返回基于上下文的回答"
+      ],
+      "dependencies": [1],
+      "ui": false
+    },
+    {
+      "id": 5,
+      "category": "core",
+      "title": "单轮问答API",
+      "description": "实现POST /api/chat接口，返回非流式回答",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "Given 知识库中有文档, when POST /api/chat with {message: '什么是RAG？'}, then 返回200，body包含answer"
+      ],
+      "dependencies": [4],
+      "ui": false
+    },
+    {
+      "id": 6,
+      "category": "core",
+      "title": "流式问答API",
+      "description": "实现POST /api/chat/stream接口，返回流式回答（SSE）",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "Given 知识库中有文档, when POST /api/chat/stream with 问题, then 返回SSE流式响应"
+      ],
+      "dependencies": [4],
+      "ui": false
+    },
+    {
+      "id": 7,
+      "category": "core",
+      "title": "Vue3前端项目初始化",
+      "description": "创建Vue3 + Vite项目，配置路由、状态管理、Axios",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "Given 前端项目代码, when 运行 npm run dev, then 前端启动成功，端口5173可访问"
+      ],
+      "dependencies": [],
+      "ui": true,
+      "ui_entry": "/"
+    },
+    {
+      "id": 8,
+      "category": "core",
+      "title": "前端布局组件",
+      "description": "实现左侧知识库列表 + 右侧聊天区域的布局",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "[devtools] Given 前端页面加载, when 打开应用, then 显示左侧边栏（240px）+ 右侧内容区"
+      ],
+      "dependencies": [7],
+      "ui": true,
+      "ui_entry": "/"
+    },
+    {
+      "id": 9,
+      "category": "core",
+      "title": "知识库列表组件",
+      "description": "前端显示知识库列表，支持点击切换",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "[devtools] Given 页面加载, when 打开知识库管理页, then 显示知识库列表，每项显示名称和文档数",
+        "[devtools] Given 知识库列表, when 点击某个知识库, then 切换为当前活跃知识库"
+      ],
+      "dependencies": [3, 8],
+      "ui": true,
+      "ui_entry": "/"
+    },
+    {
+      "id": 10,
+      "category": "core",
+      "title": "聊天界面组件",
+      "description": "实现消息气泡、输入框、发送按钮",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "[devtools] Given 聊天界面, when 用户发送消息, then 消息显示在右侧气泡中",
+        "[devtools] Given AI响应, when 收到回答, then 回答显示在左侧气泡中，支持Markdown渲染"
+      ],
+      "dependencies": [5, 6, 8],
+      "ui": true,
+      "ui_entry": "/"
+    },
+    {
+      "id": 11,
+      "category": "feature",
+      "title": "文档上传功能",
+      "description": "实现文档上传API和前端组件，支持PDF/Word/TXT",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "Given 知识库, when 上传PDF文件, then 文件上传成功，状态变为PROCESSING",
+        "[devtools] Given 上传页面, when 选择文件并点击上传, then 显示上传进度，上传成功后文件出现在列表中"
+      ],
+      "dependencies": [2],
+      "ui": true,
+      "ui_entry": "/knowledge"
+    },
+    {
+      "id": 12,
+      "category": "feature",
+      "title": "文档解析与向量化",
+      "description": "后端自动解析上传的文档并存储向量",
+      "priority": "high",
+      "status": "failing",
+      "verification_steps": [
+        "Given PDF文件上传成功, when 解析完成, then 文本内容被切分并向量化，存入Chroma",
+        "Given 解析过程, when 出现错误, then 文档状态变为FAILED"
+      ],
+      "dependencies": [11],
+      "ui": false
+    },
+    {
+      "id": 13,
+      "category": "feature",
+      "title": "知识库删除功能",
+      "description": "实现删除知识库及其所有关联数据",
+      "priority": "medium",
+      "status": "failing",
+      "verification_steps": [
+        "Given 知识库存在, when DELETE /api/knowledge-bases/{id}, then 知识库及其文档和向量数据被删除"
+      ],
+      "dependencies": [2],
+      "ui": false
+    },
+    {
+      "id": 14,
+      "category": "feature",
+      "title": "对话历史记录",
+      "description": "实现多轮对话的上下文记忆",
+      "priority": "medium",
+      "status": "failing",
+      "verification_steps": [
+        "Given 已有问答历史, when 继续提问, then 系统结合历史上下文生成回答"
+      ],
+      "dependencies": [5, 6],
+      "ui": false
+    },
+    {
+      "id": 15,
+      "category": "feature",
+      "title": "参考文档展示",
+      "description": "问答结果展示引用的源文档片段",
+      "priority": "medium",
+      "status": "failing",
+      "verification_steps": [
+        "Given AI返回回答, when 回答生成完成, then 回答下方显示引用的文档来源"
+      ],
+      "dependencies": [5, 6],
+      "ui": true,
+      "ui_entry": "/"
+    }
+  ]
+}
