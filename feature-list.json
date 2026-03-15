@@ -115,7 +115,7 @@
       "title": "RAG检索引擎",
       "description": "实现基于Chroma的向量检索和LLM生成能力",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given 知识库中有文档和向量, when 执行相似度检索, then 返回相关文档片段",
         "Given 检索结果, when 调用LLM生成回答, then 返回基于上下文的回答"
@@ -129,7 +129,7 @@
       "title": "单轮问答API",
       "description": "实现POST /api/chat接口，返回非流式回答",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given 知识库中有文档, when POST /api/chat with {message: '什么是RAG？'}, then 返回200，body包含answer"
       ],
@@ -142,7 +142,7 @@
       "title": "流式问答API",
       "description": "实现POST /api/chat/stream接口，返回流式回答（SSE）",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "verification_steps": [
         "Given 知识库中有文档, when POST /api/chat/stream with 问题, then 返回SSE流式响应"
       ],
