@@ -1,35 +1,81 @@
 <template>
   <div class="app-container">
     <div class="sidebar">
-      <div class="sidebar-header">
-        <h2>知识库</h2>
-        <button class="btn-new" @click="showCreateModal = true">
-          <span>+</span> 新建
-        </button>
-      </div>
-      <div class="knowledge-list">
-        <div 
-          v-for="kb in knowledgeBases" 
-          :key="kb.id"
-          class="knowledge-item"
-          :class="{ active: currentKb?.id === kb.id }"
-          @click="selectKnowledgeBase(kb)"
-        >
-          <div class="kb-icon">📚</div>
-          <div class="kb-info">
-            <div class="kb-name">{{ kb.name }}</div>
-            <div class="kb-time">{{ formatTime(kb.createdAt) }}</div>
-          </div>
-          <button 
-            class="btn-upload" 
-            @click.stop="showUploadModal = true; uploadKbId = kb.id"
-            title="上传文档"
-          >
-            📎
+      <!-- 知识库区域 -->
+      <div class="sidebar-section kb-section">
+        <div class="sidebar-header">
+          <h2>知识库</h2>
+          <button class="btn-new" @click="showCreateModal = true">
+            <span>+</span> 新建
           </button>
         </div>
-        <div v-if="knowledgeBases.length === 0" class="empty-tip">
-          暂无知识库，点击新建
+        <div class="knowledge-list">
+          <div 
+            v-for="kb in knowledgeBases" 
+            :key="kb.id"
+            class="knowledge-item-wrapper"
+          >
+            <div 
+              class="knowledge-item"
+              :class="{ active: currentKb?.id === kb.id }"
+              @click="selectKnowledgeBase(kb)"
+            >
+              <div class="kb-icon">📚</div>
+              <div class="kb-info">
+                <div class="kb-name">{{ kb.name }}</div>
+                <div class="kb-time">{{ formatTime(kb.createdAt) }}</div>
+              </div>
+              <button 
+                class="btn-upload" 
+                @click.stop="showUploadModal = true; uploadKbId = kb.id"
+              >
+                上传
+              </button>
+            </div>
+            <div v-if="currentKb?.id === kb.id && documents.length > 0" class="document-list">
+              <div class="document-list-title">文档列表</div>
+              <div v-for="doc in documents" :key="doc.id" class="document-item">
+                <div class="document-info">
+                  <div class="document-name">{{ doc.fileName }}</div>
+                  <div class="document-status" :class="{'status-failed': isStatusFailed(doc.status), 'status-completed': doc.status === 'COMPLETED'}">
+                    {{ getStatusText(doc.status) }}
+                    <span v-if="doc.progress && doc.status !== 'COMPLETED' && !isStatusFailed(doc.status)">({{ doc.progress }}%)</span>
+                  </div>
+                  <div v-if="doc.progress && doc.status !== 'COMPLETED' && !isStatusFailed(doc.status)" class="progress-bar">
+                    <div class="progress-fill" :style="{width: doc.progress + '%'}"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-if="knowledgeBases.length === 0" class="empty-tip">
+            暂无知识库，点击新建
+          </div>
+        </div>
+      </div>
+      
+      <!-- 聊天历史区域 -->
+      <div class="sidebar-section history-section">
+        <div class="sidebar-header">
+          <h2>聊天历史</h2>
+        </div>
+        <div class="chat-history-list">
+          <div 
+            v-for="session in sessions" 
+            :key="session.sessionId"
+            class="history-item"
+            :class="{ active: currentSession === session.sessionId }"
+            @click="loadSession(session.sessionId)"
+          >
+            <div class="history-icon">💬</div>
+            <div class="history-info">
+              <div class="history-title">{{ session.title }}</div>
+              <div class="history-time">{{ formatTime(session.lastTime) }}</div>
+            </div>
+          </div>
+          <div v-if="sessions.length === 0" class="empty-tip">
+            暂无聊天记录
+          </div>
         </div>
       </div>
     </div>
@@ -130,6 +176,7 @@ import { marked } from 'marked'
 const knowledgeBases = ref([])
 const currentKb = ref(null)
 const messages = ref([])
+const documents = ref([])
 const inputMessage = ref('')
 const loading = ref(false)
 const messagesRef = ref(null)
@@ -139,6 +186,8 @@ const showUploadModal = ref(false)
 const uploadKbId = ref(null)
 const uploadFile = ref(null)
 const uploading = ref(false)
+const sessions = ref([])
+const currentSession = ref(null)
 
 const API_BASE = 'http://localhost:8080/api'
 
@@ -157,6 +206,88 @@ const loadKnowledgeBases = async () => {
 const selectKnowledgeBase = (kb) => {
   currentKb.value = kb
   messages.value = []
+  loadDocuments(kb.id)
+  startDocPolling(kb.id)
+}
+
+let docPollInterval = null
+
+const startDocPolling = (kbId) => {
+  if (docPollInterval) clearInterval(docPollInterval)
+  docPollInterval = setInterval(() => {
+    loadDocuments(kbId)
+  }, 2000)
+}
+
+const isStillProcessing = (status) => {
+  return status === 'UPLOADING' || status === 'PARSING' || status === 'CHUNKING' || status === 'EMBEDDING'
+}
+
+const loadDocuments = async (kbId) => {
+  try {
+    const res = await axios.get(`${API_BASE}/knowledge-bases/${kbId}/documents`)
+    documents.value = res.data
+    
+    const hasProcessing = documents.value.some(d => isStillProcessing(d.status))
+    if (!hasProcessing && docPollInterval) {
+      clearInterval(docPollInterval)
+      docPollInterval = null
+    }
+  } catch (e) {
+    console.error('加载文档失败:', e)
+  }
+}
+
+const loadSessions = async () => {
+  try {
+    const res = await axios.get(`${API_BASE}/chat-history`)
+    const history = res.data
+    const sessionMap = {}
+    history.forEach(h => {
+      if (!sessionMap[h.sessionId]) {
+        sessionMap[h.sessionId] = { 
+          sessionId: h.sessionId, 
+          title: h.content.substring(0, 20) + (h.content.length > 20 ? '...' : ''),
+          lastTime: h.createdAt
+        }
+      }
+    })
+    sessions.value = Object.values(sessionMap).sort((a, b) => 
+      new Date(b.lastTime) - new Date(a.lastTime)
+    )
+  } catch (e) {
+    console.error('加载聊天历史失败:', e)
+  }
+}
+
+const loadSession = async (sessionId) => {
+  currentSession.value = sessionId
+  try {
+    const res = await axios.get(`${API_BASE}/chat-history/${sessionId}`)
+    messages.value = res.data.map(h => ({ role: h.role, content: h.content }))
+  } catch (e) {
+    console.error('加载会话失败:', e)
+  }
+}
+
+const getStatusText = (status) => {
+  const map = {
+    UPLOADING: '上传中',
+    UPLOAD_FAILED: '上传失败',
+    PARSING: '解析中',
+    PARSE_FAILED: '解析失败',
+    CHUNKING: '切片中',
+    CHUNK_FAILED: '切片失败',
+    EMBEDDING: '向量化中',
+    EMBEDDING_FAILED: '向量化失败',
+    COMPLETED: '已完成',
+    FAILED: '失败'
+  }
+  return map[status] || status
+}
+
+const isStatusFailed = (status) => {
+  return status.includes('FAILED') || status === 'FAILED'
 }
 
 const createKnowledgeBase = async () => {
@@ -195,6 +326,7 @@ const uploadDocument = async () => {
     alert('文档上传成功！')
     showUploadModal.value = false
     uploadFile.value = null
+    loadDocuments(uploadKbId.value)
     uploadKbId.value = null
   } catch (e) {
     alert('上传失败: ' + e.message)
@@ -247,6 +379,7 @@ const renderMarkdown = (content) => {
 
 onMounted(() => {
   loadKnowledgeBases()
+  loadSessions()
 })
 </script>
 
@@ -274,6 +407,59 @@ body {
   border-right: 1px solid #e5e7eb;
   display: flex;
   flex-direction: column;
+}
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.kb-section {
+  flex: 1;
+  min-height: 200px;
+  overflow: hidden;
+}
+
+.history-section {
+  border-top: 1px solid #e5e7eb;
+  max-height: 250px;
+}
+
+.chat-history-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 20px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.history-item:hover {
+  background: #f3f4f6;
+}
+
+.history-item.active {
+  background: #dbeafe;
+}
+
+.history-icon {
+  font-size: 16px;
+  margin-right: 10px;
+}
+
+.history-title {
+  font-size: 13px;
+  color: #374151;
+}
+
+.history-time {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 2px;
 }
 
 .sidebar-header {
@@ -318,6 +504,10 @@ body {
   border-left: 3px solid transparent;
 }
 
+.knowledge-item-wrapper {
+  border-bottom: 1px solid #f3f4f6;
+}
+
 .knowledge-item:hover {
   background: #f3f4f6;
 }
@@ -343,17 +533,83 @@ body {
   margin-top: 2px;
 }
 
+.document-list {
+  border-top: 1px solid #e5e7eb;
+  padding: 12px 20px;
+  max-height: 150px;
+  overflow-y: auto;
+  background: #fafafa;
+}
+
+.document-list-title {
+  font-size: 12px;
+  color: #6b7280;
+  margin-bottom: 8px;
+}
+
+.document-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 6px 8px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  background: #fff;
+}
+
+.document-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.document-name {
+  font-size: 12px;
+  color: #374151;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.document-status {
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 4px;
+  background: #e5e7eb;
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #3b82f6;
+  transition: width 0.3s ease;
+}
+
+.status-pending { color: #f59e0b; }
+.status-processing { color: #3b82f6; }
+.status-completed { color: #10b981; }
+.status-failed { color: #ef4444; }
+
 .btn-upload {
-  background: none;
-  border: none;
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
   cursor: pointer;
-  font-size: 16px;
-  opacity: 0.5;
-  padding: 4px;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  color: #374151;
 }
 
 .btn-upload:hover {
-  opacity: 1;
+  background: #e5e7eb;
 }
 
 .empty-tip {
