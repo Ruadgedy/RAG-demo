@@ -9,6 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.tika.Tika;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.file.Path;
 import java.time.LocalDateTime;
@@ -50,9 +52,11 @@ public class DocumentProcessService {
      * @param filePath  文件路径
      */
     @Async
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void processDocumentAsync(UUID documentId, Path filePath) {
         try {
-            Document document = documentRepository.findById(documentId).orElseThrow();
+            Document document = documentRepository.findById(documentId).orElseThrow(() -> 
+                new RuntimeException("文档不存在: " + documentId));
             
             // ====== 阶段1：解析文档 ======
             // 使用Apache Tika从PDF/DOCX/TXT中提取纯文本
