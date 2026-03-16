@@ -28,7 +28,7 @@ public class KnowledgeBaseController {
     
     @GetMapping
     public ResponseEntity<List<KnowledgeBaseResponse>> list() {
-        var list = service.list().stream()
+        var list = service.findAll().stream()
                 .map(KnowledgeBaseResponse::from)
                 .toList();
         return ResponseEntity.ok(list);
@@ -36,7 +36,7 @@ public class KnowledgeBaseController {
     
     @GetMapping("/{id}")
     public ResponseEntity<KnowledgeBaseResponse> get(@PathVariable UUID id) {
-        var kb = service.getById(id);
+        var kb = service.findById(id);
         return ResponseEntity.ok(KnowledgeBaseResponse.from(kb));
     }
     
