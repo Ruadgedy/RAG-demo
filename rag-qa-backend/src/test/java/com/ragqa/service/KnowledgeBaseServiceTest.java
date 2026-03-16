@@ -68,7 +68,7 @@ class KnowledgeBaseServiceTest {
         kb.setName("测试");
         when(repository.findAll()).thenReturn(java.util.List.of(kb));
         
-        var result = service.list();
+        var result = service.findAll();
         
         assertThat(result).hasSize(1);
         verify(repository).findAll();
@@ -82,7 +82,7 @@ class KnowledgeBaseServiceTest {
         kb.setName("测试");
         when(repository.findById(id)).thenReturn(Optional.of(kb));
         
-        KnowledgeBase result = service.getById(id);
+        KnowledgeBase result = service.findById(id);
         
         assertThat(result.getId()).isEqualTo(id);
     }
@@ -92,7 +92,7 @@ class KnowledgeBaseServiceTest {
         UUID id = UUID.randomUUID();
         when(repository.findById(id)).thenReturn(Optional.empty());
         
-        assertThatThrownBy(() -> service.getById(id))
+        assertThatThrownBy(() -> service.findById(id))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("知识库不存在");
     }
