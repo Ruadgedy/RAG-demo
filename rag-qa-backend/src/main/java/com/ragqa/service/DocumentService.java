@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -71,6 +72,12 @@ public class DocumentService {
         // 验证文件类型
         if (!isSupportedFileType(fileType)) {
             throw new IllegalArgumentException("不支持的文件类型: " + fileType + "，仅支持 PDF、DOCX、TXT");
+        }
+
+        // 检查同名文件是否已存在
+        Optional<Document> existingDoc = documentRepository.findByKnowledgeBaseIdAndFileName(knowledgeBaseId, fileName);
+        if (existingDoc.isPresent()) {
+            throw new IllegalArgumentException("文件已存在: " + fileName);
         }
 
         // 创建上传目录
