@@ -72,7 +72,27 @@ public class DocumentProcessService {
             
             log.info("开始解析文件: {}, 大小: {} bytes", filePath, Files.size(filePath));
             
-            String text = tika.parseToString(filePath.toFile());
+            // 对于文本文件，直接读取；对于其他文件使用Tika
+            String text;
+            String fileName = filePath.getFileName().toString().toLowerCase();
+            
+            if (fileName.endsWith(".txt")) {
+                // 文本文件直接读取，处理中文编码
+                try {
+                    text = Files.readString(filePath);
+                } catch (Exception e) {
+                    // 尝试GBK编码（常见于中文Windows）
+                    try {
+                        text = new String(Files.readAllBytes(filePath), "GBK");
+                    } catch (Exception e2) {
+                        text = new String(Files.readAllBytes(filePath), "UTF-8");
+                    }
+                }
+            } else {
+                // PDF/DOCX使用Tika
+                text = tika.parseToString(filePath.toFile());
+            }
+            
             log.info("解析文档成功，文本长度: {}", text.length());
             
             // 如果文本为空，抛出异常
