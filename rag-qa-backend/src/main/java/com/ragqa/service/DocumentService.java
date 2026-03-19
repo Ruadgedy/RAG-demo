@@ -84,8 +84,8 @@ public class DocumentService {
         Path uploadPath = Paths.get(uploadDir, knowledgeBaseId.toString());
         Files.createDirectories(uploadPath);
 
-        // 生成唯一文件名并保存
-        String storedFileName = UUID.randomUUID() + "_" + fileName;
+        // fix：直接复用原始的上传文件名
+        String storedFileName =  fileName;
         Path filePath = uploadPath.resolve(storedFileName);
         
         try {

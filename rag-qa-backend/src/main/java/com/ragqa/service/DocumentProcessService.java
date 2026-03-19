@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.Arrays;
@@ -64,8 +65,20 @@ public class DocumentProcessService {
             document.setProgress(30);  // 30%进度
             documentRepository.save(document);
             
+            // 检查文件是否存在
+            if (!Files.exists(filePath)) {
+                throw new RuntimeException("文件不存在: " + filePath);
+            }
+            
+            log.info("开始解析文件: {}, 大小: {} bytes", filePath, Files.size(filePath));
+            
             String text = tika.parseToString(filePath.toFile());
             log.info("解析文档成功，文本长度: {}", text.length());
+            
+            // 如果文本为空，抛出异常
+            if (text == null || text.trim().isEmpty()) {
+                throw new RuntimeException("无法从文档中提取文字，该文档可能是图片扫描件或加密文档");
+            }
 
             // ====== 阶段2：文本切片 ======
             // 将长文本切分成小块，便于检索和LLM处理
