@@ -103,7 +103,8 @@ public class DocumentService {
         document.setStatus(Document.DocumentStatus.UPLOADING);
         document.setProgress(10);  // 10%进度
 
-        document = documentRepository.save(document);
+        // saveAndFlush 确保数据立即写入数据库，让异步线程能读到
+        document = documentRepository.saveAndFlush(document);
         
         // 异步触发后续处理（解析、切片、向量化）
         // 注意：这里调用的是另一个Service的@Async方法
