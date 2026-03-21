@@ -329,7 +329,8 @@ const uploadDocument = async () => {
     loadDocuments(uploadKbId.value)
     uploadKbId.value = null
   } catch (e) {
-    alert('上传失败: ' + e.message)
+    const errorMsg = e.response?.data?.error || e.message || '上传失败'
+    alert('上传失败: ' + errorMsg)
   }
   
   uploading.value = false
