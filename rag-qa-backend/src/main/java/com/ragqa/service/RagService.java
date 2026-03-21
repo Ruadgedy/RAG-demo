@@ -81,7 +81,14 @@ public class RagService {
             return response;
         } catch (Exception e) {
             log.error("LLM调用失败: {}", e.getMessage());
-            return "抱歉，AI服务暂时不可用: " + e.getMessage();
+            
+            // 检查是否是余额不足错误
+            String errorMsg = e.getMessage();
+            if (errorMsg != null && (errorMsg.contains("insufficient_balance") || errorMsg.contains("1008"))) {
+                return "AI服务余额不足，请联系管理员充值后继续使用。";
+            }
+            
+            return "抱歉，AI服务暂时不可用，请稍后重试。";
         }
     }
 
