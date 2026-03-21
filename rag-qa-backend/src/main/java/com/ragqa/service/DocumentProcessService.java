@@ -116,41 +116,65 @@ public class DocumentProcessService {
             documentRepository.save(document);
 
             // 逐个处理切片
+            int successCount = 0;
+            int failCount = 0;
+            
             for (int i = 0; i < chunks.size(); i++) {
                 String chunk = chunks.get(i);
                 log.info("开始向量化第 {} 个切片", i + 1);
                 
-                // 调用Embedding服务获取向量
-                float[] embedding = embeddingService.embed(chunk);
-                
-                if (embedding.length == 0) {
-                    log.error("向量化失败，返回空向量");
-                    throw new RuntimeException("向量化返回空结果");
+                try {
+                    // 调用Embedding服务获取向量
+                    float[] embedding = embeddingService.embed(chunk);
+                    
+                    if (embedding.length == 0) {
+                        log.error("切片 {} 向量化失败，返回空向量", i + 1);
+                        failCount++;
+                        continue;
+                    }
+                    
+                    // 保存切片和向量到数据库
+                    DocumentChunk docChunk = new DocumentChunk();
+                    docChunk.setDocumentId(documentId);
+                    docChunk.setChunkIndex(i);
+                    docChunk.setContent(chunk);
+                    docChunk.setEmbedding(Arrays.toString(embedding));
+                    documentChunkRepository.save(docChunk);
+                    
+                    successCount++;
+                    log.info("切片 {} 向量化完成", i + 1);
+                    
+                } catch (Exception e) {
+                    log.error("切片 {} 向量化异常: {}", i + 1, e.getMessage());
+                    failCount++;
                 }
                 
-                // 保存切片和向量到数据库
-                DocumentChunk docChunk = new DocumentChunk();
-                docChunk.setDocumentId(documentId);
-                docChunk.setChunkIndex(i);
-                docChunk.setContent(chunk);
-                docChunk.setEmbedding(Arrays.toString(embedding));
-                documentChunkRepository.save(docChunk);
-                
                 // 更新进度（70% - 100%）
-                int embedProgress = 70 + (i * 30 / chunks.size());
+                int embedProgress = 70 + ((i + 1) * 30 / chunks.size());
                 document.setProgress(embedProgress);
                 documentRepository.save(document);
-                
-                log.info("切片 {} 向量化完成", i + 1);
             }
 
             // ====== 处理完成 ======
-            document.setChunkCount(chunks.size());
-            document.setStatus(Document.DocumentStatus.COMPLETED);
+            log.info("向量化完成，成功: {}, 失败: {}", successCount, failCount);
+            document.setChunkCount(successCount);
+            
+            // 如果全部失败，标记为失败
+            if (successCount == 0) {
+                document.setStatus(Document.DocumentStatus.FAILED);
+                document.setErrorMessage("所有切片向量化失败");
+            } else if (failCount > 0) {
+                // 部分成功，标记完成但有警告
+                document.setStatus(Document.DocumentStatus.COMPLETED);
+                document.setErrorMessage("部分切片向量化失败，成功: " + successCount + ", 失败: " + failCount);
+            } else {
+                document.setStatus(Document.DocumentStatus.COMPLETED);
+            }
+            
             document.setProgress(100);
             document.setProcessedAt(LocalDateTime.now());
             documentRepository.save(document);
-            log.info("文档处理完成，切片数量: {}", chunks.size());
+            log.info("文档处理完成，切片数量: {}", successCount);
 
         } catch (Exception e) {
             log.error("文档处理失败: {}", e.getMessage(), e);

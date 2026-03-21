@@ -3,6 +3,7 @@ package com.ragqa.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
@@ -47,6 +48,19 @@ public class EmbeddingService {
         try {
             // 调用Ollama的embeddings API
             String url = ollamaUrl + "/api/embeddings";
+
+            // 清洗文本，适配Embedding接口的JSON格式要求
+            if (!StringUtils.isBlank(text)) {
+                text = text
+                        // 1. 移除换页符、垂直制表符等特殊控制字符
+                        .replaceAll("\\f", "")
+                        // 2. 将换行符/回车符替换为空格（或转义为\\n，二选一，推荐替换为空格更易读）
+                        .replaceAll("\\r|\\n", " ")
+                        // 4. 合并多个连续空格为单个空格
+                        .replaceAll("\\s+", " ")
+                        // 5. 移除首尾空白
+                        .trim();
+            }
             
             // 构建请求体
             String requestBody = String.format("""
@@ -54,7 +68,14 @@ public class EmbeddingService {
                     "model": "%s",
                     "prompt": "%s"
                 }
-                """, modelName, text.replace("\"", "\\\""));
+                """, modelName, text
+                    .replace("\\", "\\\\")   // 反斜杠
+                    .replace("\"", "\\\"")   // 双引号
+                    .replace("\b", "\\b")    // 退格
+                    .replace("\f", "\\f")    // 换页
+                    .replace("\n", "\\n")    // 换行
+                    .replace("\r", "\\r")    // 回车
+                    .replace("\t", "\\t"));  // 制表符
 
             // 设置请求头
             org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();

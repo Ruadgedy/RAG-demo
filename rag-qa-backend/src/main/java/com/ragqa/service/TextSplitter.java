@@ -1,5 +1,6 @@
 package com.ragqa.service;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -23,10 +24,12 @@ import java.util.List;
 public class TextSplitter {
 
     /** 默认切片大小（字符数） */
-    private static final int CHUNK_SIZE = 500;
-    
+    @Value("${chunk.size:500}")
+    private int CHUNK_SIZE;
+
     /** 相邻切片重叠字符数 */
-    private static final int CHUNK_OVERLAP = 50;
+    @Value("${chunk.overlap:50}")
+    private int CHUNK_OVERLAP;
 
     /**
      * 使用默认参数切片
@@ -64,7 +67,7 @@ public class TextSplitter {
             chunks.add(chunk);
             
             // 移动起始位置（减去重叠部分）
-            start = end - overlap;
+            start = start + (chunkSize - overlap);
             
             // 如果起始位置超出文本长度，停止
             if (start >= text.length()) {
