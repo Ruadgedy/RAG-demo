@@ -109,13 +109,13 @@
       "dependencies": [1],
       "ui": false
     },
-    {
-      "id": 4,
-      "category": "core",
-      "title": "RAG检索引擎",
-      "description": "实现基于Chroma的向量检索和LLM生成能力",
-      "priority": "high",
-      "status": "passing",
+      {
+        "id": 4,
+        "category": "core",
+        "title": "RAG检索引擎",
+        "description": "实现基于Chroma的向量检索和LLM生成能力",
+        "priority": "high",
+        "status": "passing",
       "verification_steps": [
         "Given 知识库中有文档和向量, when 执行相似度检索, then 返回相关文档片段",
         "Given 检索结果, when 调用LLM生成回答, then 返回基于上下文的回答"
@@ -123,26 +123,26 @@
       "dependencies": [1],
       "ui": false
     },
-    {
-      "id": 5,
-      "category": "core",
-      "title": "单轮问答API",
-      "description": "实现POST /api/chat接口，返回非流式回答",
-      "priority": "high",
-      "status": "passing",
+      {
+        "id": 5,
+        "category": "core",
+        "title": "单轮问答API",
+        "description": "实现POST /api/chat接口，返回非流式回答",
+        "priority": "high",
+        "status": "passing",
       "verification_steps": [
         "Given 知识库中有文档, when POST /api/chat with {message: '什么是RAG？'}, then 返回200，body包含answer"
       ],
       "dependencies": [4],
       "ui": false
     },
-    {
-      "id": 6,
-      "category": "core",
-      "title": "流式问答API",
-      "description": "实现POST /api/chat/stream接口，返回流式回答（SSE）",
-      "priority": "high",
-      "status": "passing",
+      {
+        "id": 6,
+        "category": "core",
+        "title": "流式问答API",
+        "description": "实现POST /api/chat/stream接口，返回流式回答（SSE）",
+        "priority": "high",
+        "status": "passing",
       "verification_steps": [
         "Given 知识库中有文档, when POST /api/chat/stream with 问题, then 返回SSE流式响应"
       ],
@@ -192,13 +192,13 @@
       "ui": true,
       "ui_entry": "/"
     },
-    {
-      "id": 10,
-      "category": "core",
-      "title": "聊天界面组件",
-      "description": "实现消息气泡、输入框、发送按钮",
-      "priority": "high",
-      "status": "passing",
+      {
+        "id": 10,
+        "category": "core",
+        "title": "聊天界面组件",
+        "description": "实现消息气泡、输入框、发送按钮",
+        "priority": "high",
+        "status": "passing",
       "verification_steps": [
         "[devtools] Given 聊天界面, when 用户发送消息, then 消息显示在右侧气泡中",
         "[devtools] Given AI响应, when 收到回答, then 回答显示在左侧气泡中，支持Markdown渲染"
@@ -249,32 +249,48 @@
       "dependencies": [2],
       "ui": false
     },
-    {
-      "id": 14,
-      "category": "feature",
-      "title": "对话历史记录",
-      "description": "实现多轮对话的上下文记忆",
-      "priority": "medium",
-      "status": "passing",
+      {
+        "id": 14,
+        "category": "feature",
+        "title": "对话历史记录",
+        "description": "实现多轮对话的上下文记忆",
+        "priority": "medium",
+        "status": "passing",
       "verification_steps": [
         "Given 已有问答历史, when 继续提问, then 系统结合历史上下文生成回答"
       ],
       "dependencies": [5, 6],
       "ui": false
     },
-    {
-      "id": 15,
-      "category": "feature",
-      "title": "参考文档展示",
-      "description": "问答结果展示引用的源文档片段",
-      "priority": "medium",
-      "status": "passing",
+      {
+        "id": 15,
+        "category": "feature",
+        "title": "参考文档展示",
+        "description": "问答结果展示引用的源文档片段",
+        "priority": "medium",
+        "status": "passing",
       "verification_steps": [
         "Given AI返回回答, when 回答生成完成, then 回答下方显示引用的文档来源"
       ],
       "dependencies": [5, 6],
       "ui": true,
       "ui_entry": "/"
+    },
+    {
+      "id": 16,
+      "category": "feature",
+      "title": "用户注册登录",
+      "description": "实现用户注册、登录功能，使用JWT令牌认证",
+      "priority": "high",
+      "status": "passing",
+      "verification_steps": [
+        "Given 新用户, when POST /api/auth/register, then 返回200，用户创建成功",
+        "Given 已注册用户, when POST /api/auth/login, then 返回200，JWT令牌",
+        "Given 未登录用户, when 访问受保护API, then 返回401未授权"
+      ],
+      "dependencies": [],
+      "ui": true,
+      "ui_entry": "/login"
     }
   ]
 }

@@ -2,46 +2,62 @@ package com.ragqa.model;
 
 import jakarta.persistence.*;
 import lombok.Data;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.userdetails.UserDetails;
+
 import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.List;
 import java.util.UUID;
 
-/**
- * 用户实体类
- * 
- * 对应数据库表：users
- * 
- * 作用：存储用户注册信息
- */
-@Data
 @Entity
 @Table(name = "users")
-public class User {
-    
-    /** 用户唯一标识(UUID) */
+@Data
+public class User implements UserDetails {
+
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
     
-    /** 用户名（唯一，不能重复） */
     @Column(nullable = false, unique = true)
     private String username;
     
-    /** 密码（明文存储，生产环境应加密） */
     @Column(nullable = false)
     private String password;
     
-    /** 邮箱（可选） */
     private String email;
     
-    /** 创建时间 */
     @Column(name = "created_at")
     private LocalDateTime createdAt;
     
-    /**
-     * 在创建记录前自动设置创建时间
-     */
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
+    }
+
+    @Override
+    public Collection<? extends GrantedAuthority> getAuthorities() {
+        return List.of(new SimpleGrantedAuthority("ROLE_USER"));
+    }
+
+    @Override
+    public boolean isAccountNonExpired() {
+        return true;
+    }
+
+    @Override
+    public boolean isAccountNonLocked() {
+        return true;
+    }
+
+    @Override
+    public boolean isCredentialsNonExpired() {
+        return true;
+    }
+
+    @Override
+    public boolean isEnabled() {
+        return true;
     }
 }

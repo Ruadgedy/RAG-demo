@@ -78,13 +78,19 @@ public class RagService {
                     .prompt(prompt)
                     .call()
                     .content();
+            
+            if (response == null || response.isEmpty()) {
+                log.warn("LLM返回空响应，可能余额不足");
+                return "AI服务余额不足，请联系管理员充值后继续使用。";
+            }
+            
             return response;
         } catch (Exception e) {
             log.error("LLM调用失败: {}", e.getMessage());
             
             // 检查是否是余额不足错误
             String errorMsg = e.getMessage();
-            if (errorMsg != null && (errorMsg.contains("insufficient_balance") || errorMsg.contains("1008"))) {
+            if (errorMsg != null && (errorMsg.contains("insufficient_balance") || errorMsg.contains("insufficient balance") || errorMsg.contains("1008"))) {
                 return "AI服务余额不足，请联系管理员充值后继续使用。";
             }
             

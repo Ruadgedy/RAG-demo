@@ -2,13 +2,17 @@
   <div class="app-container">
     <div class="sidebar">
       <!-- 知识库区域 -->
-      <div class="sidebar-section kb-section">
-        <div class="sidebar-header">
-          <h2>知识库</h2>
-          <button class="btn-new" @click="showCreateModal = true">
-            <span>+</span> 新建
-          </button>
-        </div>
+        <div class="sidebar-section kb-section">
+          <div class="sidebar-header">
+            <h2>知识库</h2>
+            <button class="btn-new" @click="showCreateModal = true">
+              <span>+</span> 新建
+            </button>
+          </div>
+          <div class="user-info">
+            <span>欢迎, {{ username }}</span>
+            <button class="btn-logout" @click="logout">退出</button>
+          </div>
         <div class="knowledge-list">
           <div 
             v-for="kb in knowledgeBases" 
@@ -172,6 +176,16 @@
 import { ref, onMounted, nextTick } from 'vue'
 import axios from 'axios'
 import { marked } from 'marked'
+import { useRouter } from 'vue-router'
+
+const router = useRouter()
+const username = ref(localStorage.getItem('username') || '')
+
+const logout = () => {
+  localStorage.removeItem('token')
+  localStorage.removeItem('username')
+  router.push('/login')
+}
 
 const knowledgeBases = ref([])
 const currentKb = ref(null)
@@ -469,10 +483,35 @@ body {
 }
 
 .sidebar-header h2 {
-  font-size: 18px;
-  font-weight: 600;
-  color: #111827;
-  margin-bottom: 12px;
+  margin: 0;
+  font-size: 16px;
+  color: #333;
+}
+
+.user-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #666;
+  background: #f5f5f5;
+  border-radius: 4px;
+}
+
+.btn-logout {
+  padding: 4px 8px;
+  font-size: 12px;
+  background: #ef4444;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.btn-logout:hover {
+  background: #dc2626;
 }
 
 .btn-new {
