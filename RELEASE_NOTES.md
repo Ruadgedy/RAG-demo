@@ -7,12 +7,17 @@
 - Spring AI 1.0.0-M6依赖配置
 - Maven settings.xml解决阿里云mirror问题
 - Spring Boot Actuator健康检查端点
+- Feature #16: 用户注册登录功能
+  - Spring Security + JWT认证
+  - 后端API: /api/auth/register, /api/auth/login
+  - 前端登录页面和路由守卫
 
 ### Changed
-- (none yet)
+- MiniMax模型配置修复: abab5.5-chat → MiniMax-M2.5
 
 ### Fixed
-- (none yet)
+- MiniMax API调用失败问题（模型名称错误）
+- 用户注册登录功能
 
 ---
 

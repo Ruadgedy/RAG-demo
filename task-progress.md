@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 9/15 · Last: ST发现Critical缺陷 · Next: 修复MiniMax API集成
+Progress: 16/16 · Last: Feature #16 (用户注册登录) · Next: All features completed!
 
 ---
 
@@ -52,3 +52,25 @@ Progress: 9/15 · Last: ST发现Critical缺陷 · Next: 修复MiniMax API集成
 - 影响范围: Features 4,5,6,10,14,15 标记为failing
 
 **转换到Work阶段进行修复**
+
+### Session 4 — Feature #16 用户注册登录 (2026-03-22)
+
+**完成内容：**
+- ✅ 添加Spring Security和JWT依赖
+- ✅ 更新User模型实现UserDetails接口
+- ✅ 创建JwtService生成/验证JWT令牌
+- ✅ 创建JwtAuthenticationFilter处理请求认证
+- ✅ 创建SecurityConfig配置安全策略
+- ✅ 实现/api/auth/register和/api/auth/login接口
+- ✅ 前端添加LoginView.vue登录页面
+- ✅ 添加路由守卫和Axios拦截器
+- ✅ 修复MiniMax模型名称(abab5.5-chat → MiniMax-M2.5)
+
+**测试结果：**
+- 注册API: 返回JWT令牌 ✅
+- 登录API: 返回JWT令牌 ✅
+- 受保护API: 需要Authorization头 ✅
+- 前端: 登录页自动跳转 ✅
+- RAG问答: 正常工作 ✅
+
+**总计：16/16 features passed**
