@@ -5,55 +5,65 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
-/**
- * 文本切片服务
- * 
- * 作用：将长文本切分成较小的片段（chunks）
- * 
- * 为什么要切片：
- * - LLM有上下文长度限制
- * - 向量检索更精确
- * - 控制回答的来源范围
- * 
- * 切片策略：
- * - 固定长度切片（默认500字符）
- * - 相邻切片有重叠（默认50字符），保证语义连贯
- */
 @Service
 public class TextSplitter {
 
-    /** 默认切片大小（字符数） */
+    @Value("${chunk.strategy:fixed}")
+    private String chunkStrategy;
+
     @Value("${chunk.size:500}")
     private int CHUNK_SIZE;
 
-    /** 相邻切片重叠字符数 */
     @Value("${chunk.overlap:50}")
     private int CHUNK_OVERLAP;
 
-    /**
-     * 使用默认参数切片
-     * 
-     * @param text 输入文本
-     * @return 切片列表
-     */
+    private static final Pattern PARAGRAPH_PATTERN = Pattern.compile("(?m)^[\\s]*$");
+
     public List<String> split(String text) {
-        return split(text, CHUNK_SIZE, CHUNK_OVERLAP);
+        if ("paragraph".equalsIgnoreCase(chunkStrategy)) {
+            return splitByParagraph(text);
+        }
+        return splitByFixedSize(text, CHUNK_SIZE, CHUNK_OVERLAP);
+    }
+
+    public List<String> split(String text, int chunkSize, int overlap) {
+        return splitByFixedSize(text, chunkSize, overlap);
     }
 
     /**
-     * 自定义切片参数
-     * 
-     * @param text       输入文本
-     * @param chunkSize  切片大小（字符数）
-     * @param overlap    相邻切片重叠字符数
-     * @return 切片列表
-     * 
-     * 示例：
-     * text = "ABCDEFGHIJ", chunkSize = 4, overlap = 2
-     * 结果: ["ABCD", "CDEF", "EFGH", "GHIJ"]
+     * 按段落分块
      */
-    public List<String> split(String text, int chunkSize, int overlap) {
+    public List<String> splitByParagraph(String text) {
+        List<String> chunks = new ArrayList<>();
+        if (text == null || text.isEmpty()) {
+            return chunks;
+        }
+
+        String[] paragraphs = text.split("\\n\\n+");
+        
+        for (String paragraph : paragraphs) {
+            paragraph = paragraph.trim();
+            if (paragraph.isEmpty()) {
+                continue;
+            }
+            
+            if (paragraph.length() <= CHUNK_SIZE) {
+                chunks.add(paragraph);
+            } else {
+                List<String> subChunks = splitByFixedSize(paragraph, CHUNK_SIZE, CHUNK_OVERLAP);
+                chunks.addAll(subChunks);
+            }
+        }
+        
+        return chunks;
+    }
+
+    /**
+     * 固定大小分块
+     */
+    public List<String> splitByFixedSize(String text, int chunkSize, int overlap) {
         List<String> chunks = new ArrayList<>();
         if (text == null || text.isEmpty()) {
             return chunks;
@@ -61,19 +71,20 @@ public class TextSplitter {
 
         int start = 0;
         while (start < text.length()) {
-            // 截取切片
             int end = Math.min(start + chunkSize, text.length());
             String chunk = text.substring(start, end);
             chunks.add(chunk);
             
-            // 移动起始位置（减去重叠部分）
             start = start + (chunkSize - overlap);
             
-            // 如果起始位置超出文本长度，停止
             if (start >= text.length()) {
                 break;
             }
         }
         return chunks;
+    }
+
+    public String getChunkStrategy() {
+        return chunkStrategy;
     }
 }

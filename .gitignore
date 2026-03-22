@@ -10,5 +10,6 @@ target/
 .vscode/
 uploads/
 chroma-data/
+chroma/
 *.hprof
 *.class
