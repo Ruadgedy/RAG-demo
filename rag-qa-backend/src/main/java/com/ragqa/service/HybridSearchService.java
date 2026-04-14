@@ -286,8 +286,9 @@ public class HybridSearchService {
                 // 获取内容信息并构建结果
                 ChromaService.SearchResult vr = findVectorResult(vectorResults, docKey);
                 if (vr != null) {
+                    int chunkIdx = Integer.parseInt(vr.chunkIndex());
                     resultBuilder.put(docKey, new HybridSearchResult(
-                            vr.getContent(), vr.getDocumentId(), vr.getChunkIndex(),
+                            vr.content(), vr.documentId(), chunkIdx,
                             fusionScore, vScore, null, "VECTOR"));
                 }
             }
@@ -351,8 +352,10 @@ public class HybridSearchService {
         List<HybridSearchResult> results = new ArrayList<>();
         for (int i = 0; i < vectorResults.size(); i++) {
             ChromaService.SearchResult r = vectorResults.get(i);
+            // SearchResult.chunkIndex 是 String 类型，需要转换
+            int chunkIdx = Integer.parseInt(r.chunkIndex());
             results.add(new HybridSearchResult(
-                    r.getContent(), r.getDocumentId(), r.getChunkIndex(),
+                    r.content(), r.documentId(), chunkIdx,
                     1.0 / (i + 1),  // 排名分数
                     1.0 / (i + 1),
                     null,
@@ -398,7 +401,7 @@ public class HybridSearchService {
      * 【格式】documentId_chunkIndex
      */
     private String getDocKey(ChromaService.SearchResult r) {
-        return r.getDocumentId() + "_" + r.getChunkIndex();
+        return r.documentId() + "_" + r.chunkIndex();
     }
 
     /**
