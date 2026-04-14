@@ -4,7 +4,6 @@ import lombok.extern.slf4j.Slf4j;
 import net.sourceforge.tess4j.Tesseract;
 import net.sourceforge.tess4j.TesseractException;
 import net.sourceforge.tess4j.util.ImageIOHelper;
-import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -290,7 +289,7 @@ public class OcrService {
      * @return 提取的文字内容
      */
     private String extractTextLayer(Path filePath) throws IOException {
-        try (PDDocument document = Loader.loadPDF(filePath.toFile())) {
+        try (PDDocument document = PDDocument.load(filePath.toFile())) {
             // PDFTextStripper 会按页面顺序提取所有文字
             PDFTextStripper stripper = new PDFTextStripper();
             return stripper.getText(document);
@@ -327,7 +326,7 @@ public class OcrService {
         List<String> pageTexts = new ArrayList<>();
         int totalPages = 0;
 
-        try (PDDocument document = Loader.loadPDF(filePath.toFile())) {
+        try (PDDocument document = PDDocument.load(filePath.toFile())) {
             totalPages = document.getNumberOfPages();
             log.info("PDF 共 {} 页，开始 OCR 识别", totalPages);
 
