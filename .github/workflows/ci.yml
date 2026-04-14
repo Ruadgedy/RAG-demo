@@ -48,11 +48,10 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
 
-      - name: Download Maven
+      - name: Install Maven
         run: |
-          wget -q https://dlcdn.apache.org/maven/maven-3/${{ env.MAVEN_VERSION }}/binaries/apache-maven-${{ env.MAVEN_VERSION }}-bin.tar.gz
-          tar -xzf apache-maven-${{ env.MAVEN_VERSION }}-bin.tar.gz
-          echo "$GITHUB_WORKSPACE/apache-maven-${{ env.MAVEN_VERSION }}/bin" >> $GITHUB_PATH
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq maven
 
       - name: Cache Maven packages
         uses: actions/cache@v4
