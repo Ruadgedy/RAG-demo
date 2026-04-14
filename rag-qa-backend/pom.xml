@@ -105,15 +105,18 @@
         <!-- Tess4J - OCR文字识别（从PDF/图片中提取文字） -->
         <!--
             Tess4J 是 Tesseract OCR 引擎的 Java JNI 封装
+            Maven: net.sourceforge.tess4j:tess4j
+            版本: 5.16.0 (最新)
+
             使用前需要：
             1. 安装 Tesseract OCR 引擎：brew install tesseract
             2. 下载语言包：brew install tesseract-lang（默认英文，如需中文：brew install tesseract-lang）
             3. 配置环境变量：export TESSDATA_PREFIX=/usr/local/share/tessdata
         -->
         <dependency>
-            <groupId>net.java.dev.tess4j</groupId>
+            <groupId>net.sourceforge.tess4j</groupId>
             <artifactId>tess4j</artifactId>
-            <version>5.7.0</version>
+            <version>5.16.0</version>
         </dependency>
 
         <!-- Apache PDFBox - PDF 处理库（Tess4J 需要用于 PDF 渲染） -->
