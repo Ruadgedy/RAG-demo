@@ -5,7 +5,7 @@ import com.ragqa.dto.LoginRequest;
 import com.ragqa.dto.RegisterRequest;
 import com.ragqa.model.User;
 import com.ragqa.repository.UserRepository;
-import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.userdetails.UserDetails;
@@ -17,13 +17,20 @@ import org.springframework.stereotype.Service;
 import java.util.UUID;
 
 @Service
-@RequiredArgsConstructor
 public class UserService implements UserDetailsService {
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final AuthenticationManager authenticationManager;
+
+    public UserService(UserRepository userRepository, PasswordEncoder passwordEncoder, 
+                       JwtService jwtService, @Lazy AuthenticationManager authenticationManager) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.jwtService = jwtService;
+        this.authenticationManager = authenticationManager;
+    }
 
     @Override
     public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {

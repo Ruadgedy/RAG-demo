@@ -41,9 +41,9 @@ CLAUDE_MD_MARKER = "<!-- long-task-agent -->"
 _LONG_TASK_REFERENCE_BODY = (
     "\n\n<!-- long-task-agent -->\n"
     "## Long-Task Agent\n\n"
-    "This project uses a multi-session agent workflow with 12 skills loaded on-demand.\n"
+    "This project uses a multi-session agent workflow with 13 skills loaded on-demand.\n"
     "The `using-long-task` skill is injected at session start and routes to the correct phase.\n"
-    "Flow: Requirements (SRS) → UCD (UI projects) → Design → Init → Worker cycles → System Testing.\n"
+    "Flow: Requirements (SRS) → UCD (UI projects) → Design → ATS → Init → Worker cycles → System Testing → Finalize.\n"
     "Incremental development: place `increment-request.json` → Increment skill updates SRS/Design/UCD in place → new features appended → Worker cycles → ST.\n\n"
     "Key files: `docs/plans/*-srs.md` (SRS), `docs/plans/*-ucd.md` (UCD style guide), "
     "`docs/plans/*-design.md` (design), "
@@ -99,6 +99,7 @@ def create_feature_list(
     line_coverage_min: int = 90,
     branch_coverage_min: int = 80,
     mutation_score_min: int = 80,
+    mutation_full_threshold: int = 100,
 ) -> dict:
     return {
         "project": project_name,
@@ -112,7 +113,8 @@ def create_feature_list(
         "quality_gates": {
             "line_coverage_min": line_coverage_min,
             "branch_coverage_min": branch_coverage_min,
-            "mutation_score_min": mutation_score_min
+            "mutation_score_min": mutation_score_min,
+            "mutation_full_threshold": mutation_full_threshold
         },
         "constraints": [],
         "assumptions": [],
@@ -197,17 +199,17 @@ _Format: [Keep a Changelog](https://keepachangelog.com/) — Updated after every
 def create_examples_readme(project_name: str) -> str:
     return f"""# {project_name} — Examples
 
-Runnable examples demonstrating completed features. Each example corresponds to a feature in `feature-list.json`.
+Usage examples for external developers and AI Code Agents. Generated after System Testing by the `long-task-finalize` skill.
 
-## Index
+## Prerequisites
 
-| # | Feature | File | How to run |
-|---|---------|------|------------|
-| — | *(examples will be added as features are completed)* | — | — |
+*(Prerequisites will be listed when examples are generated.)*
 
----
+## Examples
 
-_Add a new row to this table each time you create an example for a completed feature._
+| # | Scenario | File | How to run |
+|---|----------|------|------------|
+| — | *(examples will be generated after System Testing)* | — | — |
 """
 
 
@@ -234,6 +236,8 @@ def main():
                         help="Min branch coverage %% (default: 80)")
     parser.add_argument("--mutation-score", type=int, default=80,
                         help="Min mutation score %% (default: 80)")
+    parser.add_argument("--mutation-full-threshold", type=int, default=100,
+                        help="Feature count threshold for full mutation per-feature (default: 100)")
 
     args = parser.parse_args()
 
@@ -259,6 +263,7 @@ def main():
             line_coverage_min=args.line_cov,
             branch_coverage_min=args.branch_cov,
             mutation_score_min=args.mutation_score,
+            mutation_full_threshold=args.mutation_full_threshold,
         ), f, indent=2, ensure_ascii=False)
     print(f"Created: {fl_path}")
 
@@ -312,11 +317,18 @@ def main():
     helper_scripts = [
         "validate_features.py",
         "check_devtools.py",
+        "check_jinja2.py",
         "validate_guide.py",
         "get_tool_commands.py",
         "validate_st_cases.py",
         "validate_increment_request.py",
+        "validate_bugfix_request.py",
         "check_st_readiness.py",
+        "check_real_tests.py",
+        "check_ats_coverage.py",
+        "check_mcp_providers.py",
+        "auto_loop.py",
+        "auto_loop_opencode.py",
     ]
     for script_name in helper_scripts:
         src = os.path.join(plugin_scripts_dir, script_name)

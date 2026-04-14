@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.2.0</version>
+        <version>3.3.0</version>
         <relativePath/>
     </parent>
     
@@ -19,7 +19,7 @@
     
     <properties>
         <java.version>17</java.version>
-        <spring-ai.version>1.0.0</spring-ai.version>
+        <spring-ai.version>1.1.3</spring-ai.version>
         <pitest.version>1.15.8</pitest.version>
     </properties>
     
@@ -46,6 +46,13 @@
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-model-minimax</artifactId>
+            <version>${spring-ai.version}</version>
+        </dependency>
+        
+        <!-- Spring AI Chroma Vector Store -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-vector-store-chroma</artifactId>
             <version>${spring-ai.version}</version>
         </dependency>
         
@@ -85,6 +92,13 @@
         <dependency>
             <groupId>org.apache.tika</groupId>
             <artifactId>tika-core</artifactId>
+            <version>2.9.1</version>
+        </dependency>
+        
+        <!-- Apache Tika Parsers - 支持Office文档(docx/xlsx/pptx等) -->
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-parsers-standard-package</artifactId>
             <version>2.9.1</version>
         </dependency>
         

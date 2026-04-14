@@ -7,28 +7,39 @@ import java.util.UUID;
 
 /**
  * 文档实体类
- * 
+ *
  * 对应数据库表：document
- * 
+ *
  * 作用：表示上传到知识库的文档文件
- * 
+ *
+ * 设计理念：
+ * - 文档是知识库的内容载体
+ * - 上传后需要异步处理（解析→切分→向量化）
+ * - 处理过程有进度跟踪，便于前端展示
+ *
  * 处理流程（状态变化）：
- * 1. UPLOADING(10%)    - 文件上传中
- * 2. PARSING(30%)      - 解析文档提取文本
- * 3. CHUNKING(50%)     - 文本分片
- * 4. EMBEDDING(70-100%) - 向量化处理
- * 5. COMPLETED(100%)  - 处理完成
- * 
+ * 1. UPLOADING(10%)       - 文件上传中
+ * 2. PARSING(30%)         - 解析文档提取文本（使用Apache Tika）
+ * 3. CHUNKING(50%)        - 文本分片（使用TextSplitter）
+ * 4. EMBEDDING(70-100%)   - 向量化处理（使用EmbeddingService）
+ * 5. COMPLETED(100%)      - 处理完成，可用于问答
+ *
  * 失败状态：
- * - UPLOAD_FAILED  - 上传失败
- * - PARSE_FAILED   - 解析失败
- * - CHUNK_FAILED   - 分片失败
- * - EMBEDDING_FAILED - 向量化失败
- * - FAILED         - 通用失败
- * 
+ * - UPLOAD_FAILED     - 上传失败
+ * - PARSE_FAILED      - 解析失败（文件损坏或格式不支持）
+ * - CHUNK_FAILED      - 分片失败（文本过长）
+ * - EMBEDDING_FAILED  - 向量化失败（模型服务不可用）
+ * - FAILED            - 通用失败
+ *
  * 关联关系：
  * - 属于一个知识库 (KnowledgeBase)
  * - 包含多个文档切片 (DocumentChunk)
+ *
+ * 存储信息：
+ * - 原始文件名和文件类型
+ * - 文件存储路径（非向量内容）
+ * - 处理进度和状态
+ * - 切片数量统计
  */
 @Data
 @Entity

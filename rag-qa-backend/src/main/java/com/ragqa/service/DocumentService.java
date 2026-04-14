@@ -39,6 +39,7 @@ public class DocumentService {
     private final KnowledgeBaseRepository knowledgeBaseRepository;
     private final DocumentChunkRepository documentChunkRepository;
     private final DocumentProcessService documentProcessService;
+    private final ChromaService chromaService;
 
     /** 文件上传目录 */
     @Value("${file.upload-dir:./uploads}")
@@ -71,7 +72,7 @@ public class DocumentService {
 
         // 验证文件类型
         if (!isSupportedFileType(fileType)) {
-            throw new IllegalArgumentException("不支持的文件类型: " + fileType + "，仅支持 PDF、DOCX、TXT");
+            throw new IllegalArgumentException("不支持的文件类型: " + fileType + "，仅支持 PDF、DOC、DOCX、XLS、XLSX、PPT、PPTX、TXT");
         }
 
         // 检查同名文件是否已存在
@@ -139,15 +140,19 @@ public class DocumentService {
      * 删除文档
      * 
      * 会同时删除：
-     * - 文档记录
-     * - 文档切片记录
+     * - Chroma向量数据库中的向量
+     * - MySQL中的切片记录
      * - 本地文件
+     * - 文档记录
      */
     @Transactional
     public void deleteDocument(UUID id) {
         Document doc = getDocument(id);
         
-        // 删除切片记录
+        // 删除Chroma向量（关键：否则向量数据库会有孤立的向量）
+        chromaService.deleteByDocumentId(id);
+        
+        // 删除MySQL切片记录
         documentChunkRepository.deleteByDocumentId(id);
         
         // 删除本地文件
@@ -168,15 +173,24 @@ public class DocumentService {
         if (fileName == null) return "";
         String lower = fileName.toLowerCase();
         if (lower.endsWith(".pdf")) return "pdf";
+        if (lower.endsWith(".doc")) return "doc";
         if (lower.endsWith(".docx")) return "docx";
+        if (lower.endsWith(".xls")) return "xls";
+        if (lower.endsWith(".xlsx")) return "xlsx";
+        if (lower.endsWith(".ppt")) return "ppt";
+        if (lower.endsWith(".pptx")) return "pptx";
         if (lower.endsWith(".txt")) return "txt";
         return "";
     }
 
     /**
      * 检查是否支持该文件类型
+     * 支持的格式：PDF、Word(doc/docx)、Excel(xls/xlsx)、PowerPoint(ppt/pptx)、TXT
      */
     private boolean isSupportedFileType(String fileType) {
-        return "pdf".equals(fileType) || "docx".equals(fileType) || "txt".equals(fileType);
+        return "pdf".equals(fileType) || "doc".equals(fileType) || "docx".equals(fileType) 
+            || "xls".equals(fileType) || "xlsx".equals(fileType)
+            || "ppt".equals(fileType) || "pptx".equals(fileType)
+            || "txt".equals(fileType);
     }
 }

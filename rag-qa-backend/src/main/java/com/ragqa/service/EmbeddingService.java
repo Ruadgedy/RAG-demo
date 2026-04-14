@@ -13,15 +13,33 @@ import java.util.List;
 
 /**
  * 向量化服务
- * 
+ *
  * 作用：将文本转换为向量（embedding）
- * 
- * 使用Ollama本地部署的embedding模型
- * 
+ *
+ * 为什么需要向量化：
+ * - 计算机无法直接"理解"文本
+ * - 向量化将文本转换为数值数组，在数学空间表示语义
+ * - 相似的文本在向量空间中距离较近
+ *
+ * 技术选型：
+ * - 使用Ollama本地部署embedding模型（qwen3-embedding:4b）
+ * - Ollama提供REST API，直接调用获取向量
+ * - 支持Sentence Transformers格式的embedding模型
+ *
  * 工作流程：
- * 1. 接收文本输入
- * 2. 调用Ollama API获取向量
- * 3. 返回float数组形式的向量
+ * 1. 接收文本输入（清洗格式）
+ * 2. 构建JSON请求体（model + prompt）
+ * 3. 调用Ollama /api/embeddings 接口
+ * 4. 解析返回的JSON，提取embedding数组
+ * 5. 返回float[]形式的向量
+ *
+ * 向量维度：
+ * - qwen3-embedding:4b 生成 4096 维向量
+ * - 每个维度是 -1 到 1 之间的浮点数
+ *
+ * 配置项：
+ * - OLLAMA_BASE_URL: Ollama服务地址（默认localhost:11434）
+ * - OLLAMA_EMBEDDING_MODEL: 模型名称（默认qwen3-embedding:4b）
  */
 @Service
 @Slf4j
