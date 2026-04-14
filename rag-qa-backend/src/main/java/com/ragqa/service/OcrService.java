@@ -1,9 +1,9 @@
 package com.ragqa.service;
 
 import lombok.extern.slf4j.Slf4j;
-import net.java.dev.tess4j.Tesseract;
-import net.java.dev.tess4j.TesseractException;
-import net.java.dev.tess4j.util.ImageIOHelper;
+import net.sourceforge.tess4j.Tesseract;
+import net.sourceforge.tess4j.TesseractException;
+import net.sourceforge.tess4j.util.ImageIOHelper;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.PDFRenderer;
