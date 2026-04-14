@@ -2,6 +2,13 @@ package com.ragqa.controller;
 
 import com.ragqa.model.Document;
 import com.ragqa.service.DocumentService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -41,61 +48,63 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api")
 @RequiredArgsConstructor
+@Tag(name = "文档", description = "文档管理接口")
 public class DocumentController {
 
     private final DocumentService documentService;
 
-    /**
-     * 上传文档
-     *
-     * 上传文件到指定知识库，系统自动进行解析和向量化
-     *
-     * @param kbId 知识库ID
-     * @param file 上传的文件（multipart/form-data）
-     * @return 创建的文档记录（状态为UPLOADING）
-     */
+    @Operation(summary = "上传文档", description = "上传文档到指定知识库，系统自动进行解析和向量化")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "上传成功",
+                    content = @Content(schema = @Schema(implementation = Document.class))),
+            @ApiResponse(responseCode = "400", description = "请求参数错误"),
+            @ApiResponse(responseCode = "401", description = "未认证"),
+            @ApiResponse(responseCode = "404", description = "知识库不存在")
+    })
     @PostMapping("/knowledge-bases/{kbId}/documents")
     public ResponseEntity<Document> uploadDocument(
-            @PathVariable UUID kbId,
-            @RequestParam("file") MultipartFile file) throws Exception {
+            @Parameter(description = "知识库ID") @PathVariable UUID kbId,
+            @Parameter(description = "上传的文件") @RequestParam("file") MultipartFile file) throws Exception {
         Document doc = documentService.uploadDocument(kbId, file);
         return ResponseEntity.ok(doc);
     }
 
-    /**
-     * 获取知识库的所有文档
-     *
-     * @param kbId 知识库ID
-     * @return 文档列表（包含状态、进度等信息）
-     */
+    @Operation(summary = "获取文档列表", description = "获取指定知识库中的所有文档")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "获取成功"),
+            @ApiResponse(responseCode = "401", description = "未认证"),
+            @ApiResponse(responseCode = "404", description = "知识库不存在")
+    })
     @GetMapping("/knowledge-bases/{kbId}/documents")
-    public ResponseEntity<List<Document>> getDocuments(@PathVariable UUID kbId) {
+    public ResponseEntity<List<Document>> getDocuments(
+            @Parameter(description = "知识库ID") @PathVariable UUID kbId) {
         List<Document> docs = documentService.getDocumentsByKnowledgeBase(kbId);
         return ResponseEntity.ok(docs);
     }
 
-    /**
-     * 获取指定文档
-     *
-     * @param id 文档ID
-     * @return 文档详情
-     */
+    @Operation(summary = "获取文档详情", description = "根据ID获取指定文档的详细信息")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "获取成功",
+                    content = @Content(schema = @Schema(implementation = Document.class))),
+            @ApiResponse(responseCode = "401", description = "未认证"),
+            @ApiResponse(responseCode = "404", description = "文档不存在")
+    })
     @GetMapping("/documents/{id}")
-    public ResponseEntity<Document> getDocument(@PathVariable UUID id) {
+    public ResponseEntity<Document> getDocument(
+            @Parameter(description = "文档ID") @PathVariable UUID id) {
         Document doc = documentService.getDocument(id);
         return ResponseEntity.ok(doc);
     }
 
-    /**
-     * 删除文档
-     *
-     * 删除文档及其所有关联的切片和向量数据
-     *
-     * @param id 文档ID
-     * @return 204 No Content
-     */
+    @Operation(summary = "删除文档", description = "删除指定文档及其所有关联的切片和向量数据")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "204", description = "删除成功"),
+            @ApiResponse(responseCode = "401", description = "未认证"),
+            @ApiResponse(responseCode = "404", description = "文档不存在")
+    })
     @DeleteMapping("/documents/{id}")
-    public ResponseEntity<Void> deleteDocument(@PathVariable UUID id) {
+    public ResponseEntity<Void> deleteDocument(
+            @Parameter(description = "文档ID") @PathVariable UUID id) {
         documentService.deleteDocument(id);
         return ResponseEntity.noContent().build();
     }

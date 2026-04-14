@@ -1,15 +1,47 @@
+# Environment
 .env
 .env.local
+.env.example
+
+# Dependencies
 node_modules/
-dist/
+
+# Build outputs
 target/
-*.log
-.DS_Store
-*.iml
+dist/
+build/
+
+# IDE
 .idea/
 .vscode/
+*.iml
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Uploads and data
 uploads/
-chroma-data/
 chroma/
+chroma-data/
+
+# Test coverage
+jacoco/
 *.hprof
+
+# Docker
+.dockerignore
+
+# Java
 *.class
+*.jar
+*.war
+
+# Python (if any)
+__pycache__/
+*.py[cod]
+.pytest_cache/

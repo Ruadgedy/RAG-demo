@@ -111,6 +111,13 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth
                 // 认证接口公开
                 .requestMatchers("/api/auth/**").permitAll()
+                // Swagger UI 和 API 文档公开
+                .requestMatchers("/swagger-ui/**").permitAll()
+                .requestMatchers("/swagger-ui.html").permitAll()
+                .requestMatchers("/v3/api-docs/**").permitAll()
+                .requestMatchers("/v3/api-docs.yaml").permitAll()
+                // Actuator 健康检查公开
+                .requestMatchers("/actuator/health").permitAll()
                 // API接口需要认证
                 .requestMatchers("/api/**").authenticated()
                 // 其他请求放行

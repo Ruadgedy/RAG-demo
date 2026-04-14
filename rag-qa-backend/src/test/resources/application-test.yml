@@ -1,0 +1,36 @@
+# 测试环境配置
+# 使用 H2 内存数据库，不依赖外部 MySQL
+
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=MySQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+
+  flyway:
+    enabled: false
+
+# 关闭 JWT 验证（测试时使用 MockMvc 模拟）
+jwt:
+  secret: test-secret-key-for-testing-purposes-only-must-be-long-enough
+  expiration: 86400000
+
+# 测试配置
+chat:
+  streaming: false
+
+# 关闭外部 API 调用
+spring.ai:
+  minimax:
+    api-key: test-key
+  ollama:
+    base-url: http://localhost:11434

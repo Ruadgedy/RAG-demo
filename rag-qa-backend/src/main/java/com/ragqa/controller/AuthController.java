@@ -4,6 +4,12 @@ import com.ragqa.dto.AuthResponse;
 import com.ragqa.dto.LoginRequest;
 import com.ragqa.dto.RegisterRequest;
 import com.ragqa.service.UserService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -30,27 +36,30 @@ import org.springframework.web.bind.annotation.*;
 @RestController
 @RequestMapping("/api/auth")
 @RequiredArgsConstructor
+@Tag(name = "认证", description = "用户注册和登录接口")
 public class AuthController {
 
     private final UserService userService;
 
-    /**
-     * 用户注册
-     *
-     * @param request 包含username、password、email
-     * @return AuthResponse(token, username)
-     */
+    @Operation(summary = "用户注册", description = "注册新用户，成功后返回JWT令牌")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "注册成功",
+                    content = @Content(schema = @Schema(implementation = AuthResponse.class))),
+            @ApiResponse(responseCode = "400", description = "请求参数错误"),
+            @ApiResponse(responseCode = "409", description = "用户名已存在")
+    })
     @PostMapping("/register")
     public ResponseEntity<AuthResponse> register(@RequestBody RegisterRequest request) {
         return ResponseEntity.ok(userService.register(request));
     }
 
-    /**
-     * 用户登录
-     *
-     * @param request 包含username、password
-     * @return AuthResponse(token, username)
-     */
+    @Operation(summary = "用户登录", description = "用户登录，验证成功后返回JWT令牌")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "登录成功",
+                    content = @Content(schema = @Schema(implementation = AuthResponse.class))),
+            @ApiResponse(responseCode = "401", description = "用户名或密码错误"),
+            @ApiResponse(responseCode = "400", description = "请求参数错误")
+    })
     @PostMapping("/login")
     public ResponseEntity<AuthResponse> login(@RequestBody LoginRequest request) {
         return ResponseEntity.ok(userService.login(request));

@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  # MySQL 数据库
+  mysql:
+    image: mysql:8
+    container_name: ragqa-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root}
+      MYSQL_DATABASE: ${DB_NAME:-ragqa}
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD:-root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Chroma 向量数据库
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: ragqa-chroma
+    restart: unless-stopped
+    ports:
+      - "${CHROMA_PORT:-8000}:8000"
+    volumes:
+      - chroma_data:/chroma/chroma/chroma-data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 后端服务
+  backend:
+    build:
+      context: ./rag-qa-backend
+      dockerfile: Dockerfile
+    container_name: ragqa-backend
+    restart: unless-stopped
+    environment:
+      # 数据库配置
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-ragqa}
+      DB_USER: root
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      # LLM 配置
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+      OPENAI_MODEL: ${OPENAI_MODEL:-MiniMax-M2.5}
+      # Chroma 配置
+      CHROMA_URL: http://chroma:8000
+      # 文件存储
+      FILE_UPLOAD_DIR: /app/uploads
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # 前端服务
+  frontend:
+    build:
+      context: ./rag-qa-frontend
+      dockerfile: Dockerfile
+    container_name: ragqa-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    environment:
+      # 前端 API 地址配置（供 nginx 使用）
+      API_BASE_URL: http://backend:8080
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
+  chroma_data:
+  uploads:
