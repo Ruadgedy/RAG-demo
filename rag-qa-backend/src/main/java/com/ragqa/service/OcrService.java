@@ -3,7 +3,6 @@ package com.ragqa.service;
 import lombok.extern.slf4j.Slf4j;
 import net.sourceforge.tess4j.Tesseract;
 import net.sourceforge.tess4j.TesseractException;
-import net.sourceforge.tess4j.util.ImageIOHelper;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -14,6 +13,7 @@ import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -343,8 +343,9 @@ public class OcrService {
                     BufferedImage image = renderer.renderImage(pageNum, 2.0f);
 
                     // Step 2: 将 BufferedImage 转为临时文件
-                    // Tesseract 需要文件路径，不能直接处理 BufferedImage
-                    File tempImage = ImageIOHelper.createTiffFromBufferedImage(image);
+                    // 使用 Files.createTempFile 创建临时 PNG 文件
+                    File tempImage = Files.createTempFile("ocr_page_" + pageNum + "_", ".png").toFile();
+                    ImageIO.write(image, "PNG", tempImage);
 
                     // Step 3: OCR 识别
                     String pageText = tesseract.doOCR(tempImage);
