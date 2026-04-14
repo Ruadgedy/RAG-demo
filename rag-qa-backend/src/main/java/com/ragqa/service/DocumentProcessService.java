@@ -21,19 +21,20 @@ import java.util.UUID;
 
 /**
  * 文档处理服务
- * 
+ *
  * 作用：异步处理上传的文档，完成解析、切分、向量化存储的完整流程
- * 
+ *
  * 处理流程（4个阶段）：
  * 1. 解析（Parsing）：提取文档中的文本内容
  * 2. 切分（Chunking）：将长文本切分为小块
  * 3. 向量化（Embedding）：将文本块转换为向量
- * 4. 存储（Storage）：同时存入MySQL和Chroma
- * 
+ * 4. 存储（Storage）：同时存入MySQL、Chroma和BM25索引
+ *
  * 特点：
  * - 使用@Async异步执行，不阻塞主线程
  * - 每个阶段更新进度，便于前端显示
  * - 支持多种文档格式（PDF、Word、TXT等）
+ * - 同时维护向量检索（Chroma）和关键词检索（BM25）索引
  */
 @Service
 @RequiredArgsConstructor
@@ -50,6 +51,12 @@ public class DocumentProcessService {
     private final EmbeddingService embeddingService;
     /** Chroma向量数据库服务 */
     private final ChromaService chromaService;
+    /** BM25关键词检索服务 */
+    private final Bm25SearchService bm25Service;
+    /** OCR 文字识别服务 */
+    private final OcrService ocrService;
+    /** 表格抽取服务 */
+    private final TableExtractorService tableExtractor;
 
     /** Apache Tika - 文档解析库，支持PDF、Word、TXT等格式 */
     private final Tika tika = new Tika();
@@ -86,7 +93,7 @@ public class DocumentProcessService {
             // 根据文件类型选择解析方式
             String text;
             String fileName = filePath.getFileName().toString().toLowerCase();
-            
+
             if (fileName.endsWith(".txt")) {
                 // TXT文件：尝试多种编码（UTF-8优先，GBK备选）
                 try {
@@ -98,11 +105,42 @@ public class DocumentProcessService {
                         text = new String(Files.readAllBytes(filePath), "UTF-8");
                     }
                 }
+            } else if (fileName.endsWith(".pdf")) {
+                // PDF文件：优先使用 Tika 提取文字层
+                // 如果文字层为空或过少，自动启用 OCR
+                text = tika.parseToString(filePath.toFile());
+
+                // 检查文字层是否有效（内容过少可能是扫描版 PDF）
+                if (text.trim().length() < 50 && ocrService.isAvailable()) {
+                    log.info("PDF 文字层内容过少（{} 字符），启用 OCR 识别", text.trim().length());
+                    String ocrText = ocrService.extractTextFromPdf(filePath);
+                    if (ocrText != null && !ocrText.isEmpty()) {
+                        // 合并：文字层 + OCR 结果
+                        text = text.trim() + "\n\n--- OCR 识别内容 ---\n\n" + ocrText;
+                    }
+                }
+            } else if (fileName.endsWith(".docx")) {
+                // Word 文档：先用 Tika 提取文字，再提取表格
+                text = tika.parseToString(filePath.toFile());
+
+                // 提取表格并追加到文本
+                List<TableExtractorService.TableInfo> tables = tableExtractor.extractTablesFromWord(filePath);
+                if (!tables.isEmpty()) {
+                    log.info("从 Word 文档提取到 {} 个表格", tables.size());
+                    StringBuilder tableSection = new StringBuilder("\n\n--- 文档中的表格 ---\n\n");
+                    for (TableExtractorService.TableInfo table : tables) {
+                        tableSection.append("【表格 ").append(table.getTableIndex() + 1)
+                                .append(" (共").append(table.getRowCount())
+                                .append("行x").append(table.getColCount()).append("列)】\n");
+                        tableSection.append(table.getMarkdownTable()).append("\n");
+                    }
+                    text = text + tableSection.toString();
+                }
             } else {
-                // 其他格式（PDF、Word等）：使用Tika解析
+                // 其他格式（Word等）：使用Tika解析
                 text = tika.parseToString(filePath.toFile());
             }
-            
+
             log.info("解析文档成功，文本长度: {}", text.length());
             
             // 检查是否成功提取文本
@@ -153,6 +191,10 @@ public class DocumentProcessService {
 
                     // 3. 同时存入Chroma向量数据库（用于快速检索）
                     chromaService.addDocument(documentId, i, chunk, embedding);
+
+                    // 4. 同时添加到BM25索引（用于关键词检索）
+                    String chunkId = documentId.toString() + "_" + i;
+                    bm25Service.addDocument(chunkId, chunk, documentId.toString(), i);
                     
                     successCount++;
                     log.info("切片 {} 向量化完成", i + 1);

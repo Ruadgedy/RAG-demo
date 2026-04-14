@@ -101,6 +101,35 @@
             <artifactId>tika-parsers-standard-package</artifactId>
             <version>2.9.1</version>
         </dependency>
+
+        <!-- Tess4J - OCR文字识别（从PDF/图片中提取文字） -->
+        <!--
+            Tess4J 是 Tesseract OCR 引擎的 Java JNI 封装
+            使用前需要：
+            1. 安装 Tesseract OCR 引擎：brew install tesseract
+            2. 下载语言包：brew install tesseract-lang（默认英文，如需中文：brew install tesseract-lang）
+            3. 配置环境变量：export TESSDATA_PREFIX=/usr/local/share/tessdata
+        -->
+        <dependency>
+            <groupId>net.java.dev.tess4j</groupId>
+            <artifactId>tess4j</artifactId>
+            <version>5.7.0</version>
+        </dependency>
+
+        <!-- Apache PDFBox - PDF 处理库（Tess4J 需要用于 PDF 渲染） -->
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>2.0.31</version>
+        </dependency>
+
+        <!-- Apache POI - Office 文档处理（Word/Excel） -->
+        <!-- 用于表格提取 -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.2.5</version>
+        </dependency>
         
         <!-- Lombok -->
         <dependency>

@@ -14,16 +14,20 @@ import java.util.stream.Collectors;
 
 /**
  * RAG（检索增强生成）服务
- * 
+ *
  * 作用：实现基于知识库的智能问答
- * 
+ *
  * RAG工作流程：
  * 1. 检索（Retrieval）：根据用户问题从知识库中查找相关文档
  * 2. 增强（Augmentation）：将检索到的文档作为上下文
  * 3. 生成（Generation）：调用LLM基于上下文生成回答
- * 
+ *
  * 核心流程：
  * chat() → retrieve() → buildContext() → buildPrompt() → LLM生成
+ *
+ * 检索策略：
+ * - 默认使用混合检索（向量 + BM25），提供更准确的检索结果
+ * - 通过 HybridSearchService 统一管理检索逻辑
  */
 @Service
 @RequiredArgsConstructor
@@ -40,6 +44,8 @@ public class RagService {
     private final EmbeddingService embeddingService;
     /** Chroma向量数据库服务 */
     private final ChromaService chromaService;
+    /** 混合检索服务（向量 + BM25） */
+    private final HybridSearchService hybridSearchService;
 
     /** 检索返回的结果数量 */
     @Value("${retrieval.topk:3}")
