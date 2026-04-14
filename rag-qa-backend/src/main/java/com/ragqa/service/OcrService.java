@@ -170,6 +170,8 @@ public class OcrService {
             } else {
                 // 尝试常见路径
                 String[] commonPaths = {
+                        // 替换为本地tessdata存储地址
+                        "/opt/homebrew/Cellar/tesseract/5.5.2/share/tessdata",
                     "/usr/local/share/tessdata",
                     "/usr/share/tessdata",
                     "/opt/homebrew/share/tessdata",
@@ -198,7 +200,7 @@ public class OcrService {
             // 6 = 假设一个统一块文本
             // 11 = 稀疏文本，按任意顺序
             // 12 = OCR 作为单行
-            tesseract.setPageSegMode(String.valueOf(psm));
+            tesseract.setPageSegMode(psm);
 
         } catch (Exception e) {
             log.error("OCR 初始化失败: {}", e.getMessage());
@@ -343,9 +345,9 @@ public class OcrService {
                     BufferedImage image = renderer.renderImage(pageNum, 2.0f);
 
                     // Step 2: 将 BufferedImage 转为临时文件
-                    // 使用 Files.createTempFile 创建临时 PNG 文件
-                    File tempImage = Files.createTempFile("ocr_page_" + pageNum + "_", ".png").toFile();
-                    ImageIO.write(image, "PNG", tempImage);
+                    // Tesseract 需要文件路径，不能直接处理 BufferedImage
+                    File tempImage = File.createTempFile("ocr_", ".png");
+                    ImageIO.write(image, "png", tempImage);
 
                     // Step 3: OCR 识别
                     String pageText = tesseract.doOCR(tempImage);

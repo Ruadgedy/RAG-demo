@@ -204,8 +204,8 @@ public class RerankService {
                 if (c instanceof ChromaService.SearchResult) {
                     ChromaService.SearchResult r = (ChromaService.SearchResult) c;
                     results.add(new RerankResult(
-                            r.getContent(), r.getDocumentId(), r.getChunkIndex(),
-                            r.getScore(), "VECTOR"));
+                            r.content(), r.documentId(), Integer.parseInt(r.chunkIndex()),
+                            r.score(), "VECTOR"));
                 } else if (c instanceof HybridSearchService.HybridSearchResult) {
                     HybridSearchService.HybridSearchResult r = (HybridSearchService.HybridSearchResult) c;
                     results.add(new RerankResult(
@@ -231,7 +231,7 @@ public class RerankService {
                 if (c instanceof ChromaService.SearchResult) {
                     ChromaService.SearchResult r = (ChromaService.SearchResult) c;
                     result.add(new RerankCandidate(
-                            r.getContent(), r.getDocumentId(), r.getChunkIndex(), r.getScore()));
+                            r.content(), r.documentId(), Integer.parseInt(r.chunkIndex()), r.score()));
                 } else if (c instanceof HybridSearchService.HybridSearchResult) {
                     HybridSearchService.HybridSearchResult r = (HybridSearchService.HybridSearchResult) c;
                     result.add(new RerankCandidate(

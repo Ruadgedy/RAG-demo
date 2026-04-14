@@ -3,6 +3,7 @@ package com.ragqa.service;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
+import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -228,12 +229,10 @@ public class TableExtractorService {
         for (int i = 0; i < rows.size(); i++) {
             XWPFTableRow row = rows.get(i);
             // 获取单元格文本列表
-            List<String> cells = row.getCellTextList();
-
-            // 清理单元格内容
+            List<XWPFTableCell> cellList = row.getTableCells();
             List<String> cleanedCells = new ArrayList<>();
-            for (String cell : cells) {
-                cleanedCells.add(cleanCellText(cell));
+            for (XWPFTableCell cell : cellList) {
+                cleanedCells.add(cleanCellText(cell.getText()));
             }
 
             // 构建 Markdown 行
