@@ -13,45 +13,67 @@ import java.io.InputStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Pattern;
 
 /**
+ * ============================================================
  * 表格内容抽取服务
+ * ============================================================
  *
- * 作用：从 Word (.docx) 和 Excel (.xlsx) 文档中提取表格内容
+ * 【功能说明】
+ * 从 Word (.docx) 和 Excel (.xlsx) 文档中提取表格内容，
+ * 并转换为 Markdown 格式，便于 LLM 理解和问答。
  *
- * 为什么需要表格抽取：
+ * 【为什么需要表格抽取】
+ *
  * ┌─────────────────────────────────────────────────────────────────┐
- * │                    文档中的表格处理问题                          │
+ * │                    普通文本处理的局限性                            │
  * ├─────────────────────────────────────────────────────────────────┤
  * │                                                                 │
- * │   普通文本处理（会丢失表格结构）：                                 │
- * │   ┌─────────────┬─────────────┬─────────────┐                   │
- * │   │ 姓名        │  语文       │  数学       │                   │
- * │   ├─────────────┼─────────────┼─────────────┤  →  "姓名 语文 数学 │
- * │   │ 张三        │  90        │  85        │     张三 90 85     │
- * │   └─────────────┴─────────────┴─────────────┘     李四 92 88"   │
+ * │   普通文本提取（会丢失表格结构）：                                  │
  * │                                                                 │
- * │   表格抽取处理（保留结构）：                                      │
+ * │   原始表格：                                                      │
  * │   ┌─────────────┬─────────────┬─────────────┐                   │
  * │   │ 姓名        │  语文       │  数学       │                   │
- * │   ├─────────────┼─────────────┼─────────────┤  → Markdown 格式： │
- * │   │ 张三        │  90        │  85        │     | 姓名 | 语文 | │
- * │   │ 李四        │  92        │  88        │     |------|-----| │
- * │   └─────────────┴─────────────┴─────────────┘     | 张三 | 90  | │
- * │                                                   | 李四 | 92  | │
+ * │   ├─────────────┼─────────────┼─────────────┤                   │
+ * │   │ 张三        │  90        │  85        │                   │
+ * │   └─────────────┴─────────────┴─────────────┘                   │
+ * │                                                                 │
+ * │   普通提取结果（丢失结构）：                                        │
+ * │   "姓名 语文 数学 张三 90 85 李四 92 88"                        │
+ * │                                                                 │
+ * │   ❌ 问题：无法知道张三的语文成绩是90还是85                       │
+ * │   ❌ 问题：表格行列关系丢失                                      │
+ * │                                                                 │
  * └─────────────────────────────────────────────────────────────────┘
  *
- * 输出格式：
- * - Markdown 表格格式，便于 LLM 理解和回答涉及表格数据的问题
- * - 示例："张三的数学成绩是多少？" → 直接回答"85分"
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │                    表格抽取后的结果                               │
+ * ├─────────────────────────────────────────────────────────────────┤
+ * │                                                                 │
+ * │   Markdown 表格：                                                │
+ * │   | 姓名 | 语文 | 数学 |                                         │
+ * │   |------|------|------|                                        │
+ * │   | 张三 | 90   | 85   |                                        │
+ * │   | 李四 | 92   | 88   |                                        │
+ * │                                                                 │
+ * │   ✅ 行列关系完整保留                                            │
+ * │   ✅ LLM 可以理解表格结构                                        │
+ * │   ✅ 可以回答"张三的数学成绩是多少"                               │
+ * │                                                                 │
+ * └─────────────────────────────────────────────────────────────────┘
  *
- * 支持的表格格式：
+ * 【支持的表格格式】
  * - Word (.docx)：通过 Apache POI 提取
  * - Excel (.xlsx)：通过 Apache POI 提取
- * - PDF：表格结构较复杂，由 Tika 尽量提取，Tess4J OCR 辅助
+ * - PDF：表格结构较复杂，由 Tika 尽量提取
  *
- * 依赖：
+ * 【输出格式】
+ * Markdown 表格格式：
+ * | 列1 | 列2 | 列3 |
+ * |------|------|------|
+ * | 内容 | 内容 | 内容 |
+ *
+ * 【依赖】
  * - Apache POI（已通过 Tika 间接引入）
  * - 支持 XWPF（Word）和 XSSF（Excel）
  */
@@ -59,24 +81,39 @@ import java.util.regex.Pattern;
 @Slf4j
 public class TableExtractorService {
 
+    // ============================================================
+    // 配置
+    // ============================================================
+
     /** 是否启用表格抽取 */
     @Value("${table.extraction.enabled:true}")
     private boolean extractionEnabled;
 
     /** 最小表格行数（小于此值不抽取） */
+    // 【说明】太小的表格可能只是简单列表，不值得抽取
     private static final int MIN_TABLE_ROWS = 2;
 
     /** 最小表格列数 */
     private static final int MIN_TABLE_COLS = 2;
 
+    // ============================================================
+    // 数据结构
+    // ============================================================
+
     /**
-     * Word 表格信息
+     * 表格信息
+     *
+     * 【说明】封装提取出的表格的完整信息
      */
     public static class TableInfo {
-        private final int tableIndex;           // 表格在文档中的索引
-        private final int rowCount;              // 行数
-        private final int colCount;              // 列数
-        private final String markdownTable;     // Markdown 格式的表格
+        /** 表格在文档中的索引（从0开始） */
+        private final int tableIndex;
+        /** 行数 */
+        private final int rowCount;
+        /** 列数 */
+        private final int colCount;
+        /** Markdown 格式的表格内容 */
+        private final String markdownTable;
 
         public TableInfo(int tableIndex, int rowCount, int colCount, String markdownTable) {
             this.tableIndex = tableIndex;
@@ -91,8 +128,20 @@ public class TableExtractorService {
         public String getMarkdownTable() { return markdownTable; }
     }
 
+    // ============================================================
+    // 核心方法
+    // ============================================================
+
     /**
      * 从 Word 文档中提取所有表格
+     *
+     * 【支持的格式】
+     * - .docx（Word 2007+）
+     *
+     * 【处理流程】
+     * 1. 加载 Word 文档
+     * 2. 遍历文档中的所有表格
+     * 3. 将每个表格转换为 Markdown 格式
      *
      * @param filePath Word 文件路径
      * @return 表格列表（Markdown 格式）
@@ -100,6 +149,7 @@ public class TableExtractorService {
     public List<TableInfo> extractTablesFromWord(Path filePath) {
         List<TableInfo> tables = new ArrayList<>();
 
+        // 表格抽取被禁用
         if (!extractionEnabled) {
             log.debug("表格抽取已禁用");
             return tables;
@@ -108,11 +158,14 @@ public class TableExtractorService {
         try (InputStream fis = new FileInputStream(filePath.toFile());
              XWPFDocument document = new XWPFDocument(fis)) {
 
+            // 获取文档中的所有表格
+            // 【注意】这只会获取文档正文的表格，不会获取页眉页脚的表格
             List<XWPFTable> xwpfTables = document.getTables();
             log.info("Word 文档包含 {} 个表格", xwpfTables.size());
 
             int tableIndex = 0;
             for (XWPFTable table : xwpfTables) {
+                // 转换为 Markdown 格式
                 TableInfo tableInfo = convertTableToMarkdown(table, tableIndex);
                 if (tableInfo != null) {
                     tables.add(tableInfo);
@@ -132,17 +185,27 @@ public class TableExtractorService {
     /**
      * 将 Word 表格转换为 Markdown 格式
      *
-     * 转换示例：
-     * ┌─────────────┬─────────────┐
-     * │ 姓名        │  语文       │
-     * ├─────────────┼─────────────┤
-     * │ 张三        │  90         │
-     * └─────────────┴─────────────┘
+     * 【转换示例】
      *
-     * 转换为：
-     * | 姓名 | 语文 |
-     * |------|------|
-     * | 张三 | 90  |
+     * 原始 Word 表格：
+     * ┌─────────────┬─────────────┬─────────────┐
+     * │ 姓名        │  语文       │  数学       │
+     * ├─────────────┼─────────────┼─────────────┤
+     * │ 张三        │  90         │  85         │
+     * └─────────────┴─────────────┴─────────────┘
+     *
+     * 转换为 Markdown：
+     * | 姓名 | 语文 | 数学 |
+     * |------|------|------|
+     * | 张三 | 90   | 85   |
+     *
+     * 【过滤规则】
+     * - 行数 < 2：不是真正的表格
+     * - 列数 < 2：不是真正的表格
+     *
+     * @param table Word 表格对象
+     * @param tableIndex 表格索引
+     * @return 表格信息，如果不满足条件返回 null
      */
     private TableInfo convertTableToMarkdown(XWPFTable table, int tableIndex) {
         List<XWPFTableRow> rows = table.getRows();
@@ -152,7 +215,7 @@ public class TableExtractorService {
             return null;
         }
 
-        // 检查列数（使用第一行作为参考）
+        // 获取列数（使用第一行作为参考）
         XWPFTableRow headerRow = rows.get(0);
         int colCount = headerRow.getTableCells().size();
         if (colCount < MIN_TABLE_COLS) {
@@ -161,21 +224,23 @@ public class TableExtractorService {
 
         StringBuilder md = new StringBuilder();
 
-        // 构建 Markdown 表格
+        // 遍历每一行
         for (int i = 0; i < rows.size(); i++) {
             XWPFTableRow row = rows.get(i);
+            // 获取单元格文本列表
             List<String> cells = row.getCellTextList();
 
-            // 清理单元格内容（移除多余空白）
+            // 清理单元格内容
             List<String> cleanedCells = new ArrayList<>();
             for (String cell : cells) {
                 cleanedCells.add(cleanCellText(cell));
             }
 
-            // 添加行
+            // 构建 Markdown 行
             md.append("| ").append(String.join(" | ", cleanedCells)).append(" |\n");
 
-            // 添加分隔行（第二行作为表头分隔）
+            // 在表头后添加分隔行
+            // 【说明】第二行（索引1）添加 |---|---| 形式的分隔线
             if (i == 0) {
                 md.append("| ");
                 for (int j = 0; j < cleanedCells.size(); j++) {
@@ -194,10 +259,13 @@ public class TableExtractorService {
     /**
      * 清理单元格文本
      *
-     * 处理规则：
-     * 1. 合并多个连续空白为单个空格
-     * 2. 移除首尾空白
-     * 3. 处理单元格中的换行（转为空格）
+     * 【处理规则】
+     * 1. 换行符转为空格（单元格内换行通常不是表格结构）
+     * 2. 多个空白合并为单个空格
+     * 3. 移除首尾空白
+     *
+     * 【示例】
+     * 输入: "  张\n\n三  "  →  输出: "张三"
      *
      * @param text 原始单元格文本
      * @return 清理后的文本
@@ -215,25 +283,29 @@ public class TableExtractorService {
     }
 
     /**
-     * 从文本中识别并标记表格内容
+     * 从文本中识别并转换表格
      *
-     * 用于 Tika 提取的原始文本中的表格结构识别
-     * Tika 提取的文本可能包含表格分隔符（如 |、+、-）
+     * 【用途】
+     * 处理 Tika 提取的原始文本中的表格结构
+     *
+     * 【支持的格式】
+     * 1. Markdown 表格：| col1 | col2 |
+     * 2. ASCII 表格：+----+-----+
      *
      * @param text 原始文本
-     * @return 处理后的文本（表格转为 Markdown 格式）
+     * @return 处理后的文本（表格转为 Markdown）
      */
     public String detectAndConvertTables(String text) {
         if (!extractionEnabled || text == null) {
             return text;
         }
 
-        // 识别 Markdown 表格（| col1 | col2 |）
+        // 识别 Markdown 表格
         if (text.contains("|")) {
             text = convertMarkdownLikeTables(text);
         }
 
-        // 识别 ASCII 表格（+---+---+）
+        // 识别 ASCII 表格
         if (text.contains("+---")) {
             text = convertAsciiTables(text);
         }
@@ -242,9 +314,15 @@ public class TableExtractorService {
     }
 
     /**
-     * 转换类似 Markdown 的表格格式
+     * 转换 Markdown 风格的表格
      *
-     * 处理 Tika 提取的表格文本，确保每行以 | 开头和结尾
+     * 【识别规则】
+     * - 行中包含 3 个或更多 | 字符
+     *
+     * 【处理逻辑】
+     * 1. 识别表格行
+     * 2. 跳过 Markdown 分隔行（|---|）
+     * 3. 规范化表格格式
      */
     private String convertMarkdownLikeTables(String text) {
         StringBuilder result = new StringBuilder();
@@ -262,16 +340,17 @@ public class TableExtractorService {
                     inTable = true;
                 }
 
-                // 检查是否是分隔行（|---|---|）
+                // 跳过 Markdown 分隔行
                 if (isSeparatorLine(line)) {
-                    continue; // 跳过 Markdown 分隔行
+                    continue;
                 }
 
-                // 清理和格式化表格行
+                // 格式化并添加行
                 line = formatMarkdownTableLine(line);
                 result.append(line).append("\n");
                 pipeCount = currentPipeCount;
             } else {
+                // 非表格行
                 if (inTable && pipeCount > 0) {
                     // 表格结束，添加空行分隔
                     result.append("\n");
@@ -287,7 +366,10 @@ public class TableExtractorService {
     /**
      * 判断是否是 Markdown 分隔行
      *
-     * 分隔行示例：|---|---| 或 |:---|:---| (带对齐)
+     * 【分隔行示例】
+     * |---|---|---|
+     * |:---|:---|:---|
+     * |:---|---\ |:---|
      */
     private boolean isSeparatorLine(String line) {
         // 移除首尾 | 和空格
@@ -298,9 +380,12 @@ public class TableExtractorService {
 
     /**
      * 格式化 Markdown 表格行
+     *
+     * 【规范化操作】
+     * 1. 确保首尾有 |
+     * 2. 单元格之间的空格标准化
      */
     private String formatMarkdownTableLine(String line) {
-        // 规范化：确保首尾有 |
         line = line.trim();
         if (!line.startsWith("|")) {
             line = "|" + line;
@@ -317,26 +402,29 @@ public class TableExtractorService {
     /**
      * 转换 ASCII 艺术表格
      *
-     * ASCII 表格示例：
+     * 【ASCII 表格示例】
      * +----+------+------+
      * |姓名 | 语文 | 数学 |
      * +----+------+------+
      * |张三 |  90  |  85  |
      * +----+------+------+
+     *
+     * 【转换规则】
+     * 1. 跳过边框行（+---+）
+     * 2. 将 | 分隔的单元格转为 Markdown 格式
      */
     private String convertAsciiTables(String text) {
         StringBuilder result = new StringBuilder();
         String[] lines = text.split("\\n");
 
         for (String line : lines) {
-            // 检查是否是 ASCII 表格线
+            // 跳过 ASCII 边框行
             if (line.contains("+---")) {
-                continue; // 跳过表格边框线
+                continue;
             }
 
             // 转换 | 分隔的单元格
             if (line.contains("|")) {
-                // 提取单元格内容并转为 Markdown
                 String mdLine = convertAsciiRowToMarkdown(line);
                 result.append(mdLine).append("\n");
             } else {
@@ -350,7 +438,9 @@ public class TableExtractorService {
     /**
      * 将 ASCII 表格行转为 Markdown
      *
-     * |姓名 | 语文 | 数学 |  →  | 姓名 | 语文 | 数学 |
+     * 【示例】
+     * 输入:  |姓名 | 语文 | 数学 |
+     * 输出:  | 姓名 | 语文 | 数学 |
      */
     private String convertAsciiRowToMarkdown(String line) {
         // 移除首尾的 |
@@ -360,7 +450,7 @@ public class TableExtractorService {
         // 按 | 分割
         String[] cells = line.split("\\|");
 
-        // 清理每个单元格并重新拼接
+        // 清理并重新拼接
         StringBuilder md = new StringBuilder("|");
         for (String cell : cells) {
             md.append(cleanCellText(cell)).append("|");
