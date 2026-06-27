@@ -56,8 +56,8 @@ class ChatServiceTest {
 
         assertThat(result.getAnswer()).isEqualTo("这是测试回答");
         assertThat(result.getSessionId()).isNotNull();
-        // user 问题与 assistant 回答两条记录都应被持久化
-        verify(chatHistoryRepository, times(2)).save(any());
+        // user 问题与 assistant 回答两条记录都应被持久化（saveAndFlush 强制立即写入）
+        verify(chatHistoryRepository, times(2)).saveAndFlush(any());
         verify(ragService).chat("测试问题", kbId);
     }
 
