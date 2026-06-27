@@ -5,6 +5,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * ============================================================
@@ -166,6 +168,27 @@ public class Bm25SearchService {
     // 索引存储
     // ============================================================
 
+    /**
+     * 读写锁
+     *
+     * 【作用】保护核心索引数据结构（documents / invertedIndex / docLengths / averageDocLength / totalDocs）的线程安全
+     *
+     * 【为什么用 ReentrantReadWriteLock 而不是 ConcurrentHashMap】
+     * 1. search() 会遍历多个 map 的一致性快照，如果只用 ConcurrentHashMap 会读到撕裂状态
+     *    （比如 documents 有新 chunk，但 invertedIndex 还没更新）
+     * 2. totalDocs / averageDocLength 是聚合统计，跨多个 map，用读锁能保证读一致性
+     * 3. 读多写少场景（search 是热路径，addDocument 仅上传时调用），读写锁能最大化读并发
+     *
+     * 【锁粒度】
+     * - 读锁：search() 整个方法
+     * - 写锁：addDocument / addDocuments / removeByDocumentId / clear 整个方法
+     *
+     * 【idfCache 不在主锁范围内】
+     * idfCache 是纯缓存（重复计算结果），用 ConcurrentHashMap 即可，
+     * 这样 calculateIdf 内的缓存写入不会阻塞 search 主流程。
+     */
+    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+
     /** 文档集合：chunkId -> DocumentChunk */
     // 【说明】存储所有已索引的文档切片，供检索使用
     private final Map<String, DocumentChunk> documents = new HashMap<>();
@@ -190,7 +213,9 @@ public class Bm25SearchService {
     private int totalDocs = 0;
 
     /** IDF 缓存：term -> IDF分数（避免重复计算） */
-    private final Map<String, Double> idfCache = new HashMap<>();
+    // 用 ConcurrentHashMap 而非 HashMap：calculateIdf 在 search 路径上会被调用，
+    // 不应被 search 的读锁阻塞。ConcurrentHashMap 的并发写对缓存一致性足够安全。
+    private final Map<String, Double> idfCache = new ConcurrentHashMap<>();
 
     // ============================================================
     // 核心方法
@@ -217,47 +242,52 @@ public class Bm25SearchService {
      * @param chunkIndex 切片索引
      */
     public void addDocument(String chunkId, String content, String documentId, int chunkIndex) {
-        // Step 1: 创建文档对象
-        DocumentChunk chunk = new DocumentChunk(chunkId, content, documentId, chunkIndex);
-        documents.put(chunkId, chunk);
+        lock.writeLock().lock();
+        try {
+            // Step 1: 创建文档对象
+            DocumentChunk chunk = new DocumentChunk(chunkId, content, documentId, chunkIndex);
+            documents.put(chunkId, chunk);
 
-        // Step 2: 分词
-        // 【分词示例】
-        // 输入: "Hello, World! 你好，世界！"
-        // 输出: ["hello", "world", "你", "好", "世", "界"]
-        List<String> terms = tokenize(content);
+            // Step 2: 分词
+            // 【分词示例】
+            // 输入: "Hello, World! 你好，世界！"
+            // 输出: ["hello", "world", "你", "好", "世", "界"]
+            List<String> terms = tokenize(content);
 
-        // Step 3: 统计词频
-        // Map<词, 出现次数>
-        // 【示例】
-        // "Java Java Java Python"
-        // -> {"java": 3, "python": 1}
-        Map<String, Integer> termFreq = new HashMap<>();
-        for (String term : terms) {
-            termFreq.put(term, termFreq.getOrDefault(term, 0) + 1);
+            // Step 3: 统计词频
+            // Map<词, 出现次数>
+            // 【示例】
+            // "Java Java Java Python"
+            // -> {"java": 3, "python": 1}
+            Map<String, Integer> termFreq = new HashMap<>();
+            for (String term : terms) {
+                termFreq.put(term, termFreq.getOrDefault(term, 0) + 1);
+            }
+
+            // Step 4: 更新文档长度统计
+            int docLength = terms.size();
+            docLengths.put(chunkId, docLength);
+            totalDocs++;
+            averageDocLength = (averageDocLength * (totalDocs - 1) + docLength) / totalDocs;
+
+            // Step 5: 更新倒排索引
+            // 【核心操作】
+            // 对于每个词 term，将当前文档添加到 term 的倒排列表中
+            // 倒排列表存储：(chunkId -> 词频)
+            for (Map.Entry<String, Integer> entry : termFreq.entrySet()) {
+                String term = entry.getKey();
+                double tf = entry.getValue();  // 词频
+
+                // computeIfAbsent: 如果 term 不存在，创建一个新的 HashMap
+                // 然后把 (chunkId -> tf) 添加进去
+                invertedIndex.computeIfAbsent(term, k -> new HashMap<>()).put(chunkId, tf);
+            }
+
+            // 清除 IDF 缓存（因为文档集合变了，需要重新计算）
+            idfCache.clear();
+        } finally {
+            lock.writeLock().unlock();
         }
-
-        // Step 4: 更新文档长度统计
-        int docLength = terms.size();
-        docLengths.put(chunkId, docLength);
-        totalDocs++;
-        averageDocLength = (averageDocLength * (totalDocs - 1) + docLength) / totalDocs;
-
-        // Step 5: 更新倒排索引
-        // 【核心操作】
-        // 对于每个词 term，将当前文档添加到 term 的倒排列表中
-        // 倒排列表存储：(chunkId -> 词频)
-        for (Map.Entry<String, Integer> entry : termFreq.entrySet()) {
-            String term = entry.getKey();
-            double tf = entry.getValue();  // 词频
-
-            // computeIfAbsent: 如果 term 不存在，创建一个新的 HashMap
-            // 然后把 (chunkId -> tf) 添加进去
-            invertedIndex.computeIfAbsent(term, k -> new HashMap<>()).put(chunkId, tf);
-        }
-
-        // 清除 IDF 缓存（因为文档集合变了，需要重新计算）
-        idfCache.clear();
     }
 
     /**
@@ -273,12 +303,120 @@ public class Bm25SearchService {
      * 清空索引
      */
     public void clear() {
-        documents.clear();
-        invertedIndex.clear();
-        docLengths.clear();
+        lock.writeLock().lock();
+        try {
+            documents.clear();
+            invertedIndex.clear();
+            docLengths.clear();
+            idfCache.clear();
+            averageDocLength = 0;
+            totalDocs = 0;
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * 按 documentId 移除该文档的所有 chunk
+     *
+     * 【作用】
+     * 删除文档/知识库时调用，清理 BM25 索引中的孤儿 chunk。
+     * 否则索引会无限膨胀，且 IDF 统计被已删除的 chunk 污染。
+     *
+     * 【chunkId 格式】
+     * 调用方（DocumentProcessService）使用 `${documentId}_${chunkIndex}` 作为 chunkId。
+     * UUID 的 toString() 不含下划线，因此可以用 documentId + "_" 作为前缀精确匹配。
+     *
+     * 【清理流程】
+     * 1. 找出所有以 documentId + "_" 开头的 chunkId
+     * 2. 从 documents / docLengths 移除
+     * 3. 遍历倒排索引每个 term 的 posting 列表，移除该 chunkId；term 空了则删除该 term entry（防内存泄漏）
+     * 4. 增量更新 totalDocs / averageDocLength
+     * 5. 清空 idfCache（任何 term 的 IDF 都可能因 N 变化而失效）
+     *
+     * @param documentId 文档ID（UUID.toString() 形式）
+     * @return 被移除的 chunk 数量
+     */
+    public int removeByDocumentId(String documentId) {
+        lock.writeLock().lock();
+        try {
+            return doRemoveByDocumentId(documentId);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * removeByDocumentId 的实际实现（在写锁内执行）
+     */
+    private int doRemoveByDocumentId(String documentId) {
+        if (documentId == null || documentId.isEmpty()) {
+            return 0;
+        }
+
+        // 前缀：documentId + "_"
+        // 例：documentId="abc-123"，匹配 "abc-123_0", "abc-123_1", ...
+        String prefix = documentId + "_";
+
+        // Step 1: 收集待移除的 chunkId（先快照再删除，避免 ConcurrentModificationException）
+        List<String> toRemove = new ArrayList<>();
+        for (String chunkId : documents.keySet()) {
+            if (chunkId.equals(documentId) || chunkId.startsWith(prefix)) {
+                toRemove.add(chunkId);
+            }
+        }
+
+        if (toRemove.isEmpty()) {
+            return 0;
+        }
+
+        // Step 2-3: 从各数据结构中移除
+        for (String chunkId : toRemove) {
+            DocumentChunk chunk = documents.remove(chunkId);
+            docLengths.remove(chunkId);
+
+            if (chunk == null) {
+                continue;
+            }
+
+            // 分词（同 tokenize 逻辑，保持一致）
+            List<String> terms = tokenize(chunk.getContent());
+
+            // 去重后清理倒排索引
+            Set<String> uniqueTerms = new HashSet<>(terms);
+            for (String term : uniqueTerms) {
+                Map<String, Double> posting = invertedIndex.get(term);
+                if (posting == null) {
+                    continue;
+                }
+                posting.remove(chunkId);
+                // term 不再被任何 chunk 引用，移除 term entry 防止内存泄漏
+                if (posting.isEmpty()) {
+                    invertedIndex.remove(term);
+                }
+            }
+        }
+
+        // Step 4: 增量更新 totalDocs / averageDocLength
+        int removedCount = toRemove.size();
+        totalDocs = Math.max(0, totalDocs - removedCount);
+        if (totalDocs > 0) {
+            // 增量更新均值：sum = avg * N，求和原长度后再除以新总数
+            long totalLength = 0;
+            for (int len : docLengths.values()) {
+                totalLength += len;
+            }
+            averageDocLength = (double) totalLength / totalDocs;
+        } else {
+            averageDocLength = 0;
+        }
+
+        // Step 5: 任何 term 的 IDF 都可能因 N 变化而失效，必须清空
         idfCache.clear();
-        averageDocLength = 0;
-        totalDocs = 0;
+
+        log.debug("BM25 索引移除 documentId={} 的 {} 个 chunk，剩余 chunk 数={}",
+                documentId, removedCount, totalDocs);
+        return removedCount;
     }
 
     /**
@@ -299,6 +437,18 @@ public class Bm25SearchService {
      * @return 按相关性分数降序排列的结果列表
      */
     public List<Bm25Result> search(String query, int topK) {
+        lock.readLock().lock();
+        try {
+            return doSearch(query, topK);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * search 的实际实现（在读锁内执行，保证一致性快照）
+     */
+    private List<Bm25Result> doSearch(String query, int topK) {
         if (documents.isEmpty()) {
             return Collections.emptyList();
         }
