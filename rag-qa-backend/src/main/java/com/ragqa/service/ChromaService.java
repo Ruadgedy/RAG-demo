@@ -15,6 +15,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Chroma向量数据库服务
@@ -41,9 +42,9 @@ public class ChromaService {
     @Value("${spring.ai.vectorstore.chroma.url:http://localhost:8000}")
     private String chromaUrl;
 
-    /** Chroma集合ID (UUID) */
-    @Value("${spring.ai.vectorstore.chroma.collection-id:f1218ee8-1d3a-4e10-bc99-1db28817f896}")
-    private String collectionId;
+    /** Chroma集合名称 */
+    @Value("${spring.ai.vectorstore.chroma.collection-name:rag-qa-collection}")
+    private String collectionName;
 
     /** Chroma Tenant名称 */
     @Value("${spring.ai.vectorstore.chroma.tenant-name:SpringAiTenant}")
@@ -55,6 +56,12 @@ public class ChromaService {
 
     /** Spring AI的VectorStore接口（保留但不使用，用于依赖注入） */
     private final VectorStore vectorStore;
+
+    /** 已解析的 collectionId 缓存（避免每次 add/query 都打 Chroma 一次 GET） */
+    private volatile String cachedCollectionId;
+
+    /** 缓存与 Chroma 实际状态同步用的租户级锁：保证同一进程内并发首调安全 */
+    private final ConcurrentHashMap<String, Object> resolveLocks = new ConcurrentHashMap<>();
 
     /** 检索时返回的最相似结果数量，默认3个 */
     @Getter
@@ -69,6 +76,89 @@ public class ChromaService {
     public ChromaService(VectorStore vectorStore, EmbeddingService embeddingService) {
         this.vectorStore = vectorStore;
         this.embeddingService = embeddingService;
+    }
+
+    /**
+     * 获取或创建集合，返回collection ID
+     *
+     * 修复说明（2026-06-27）：
+     * - 原实现无脑 POST 创建，Chroma v2 在 collection 已存在时返回 409，导致
+     *   每个切片第 1 次 add 失败、后续 add 也连带失败。
+     * - 新实现先按 collectionName 在 GET 列表中查找，找到直接返回；
+     *   找不到再 POST 创建；用 cachedCollectionId 缓存避免每次 add 都打 Chroma。
+     * - 通过 resolveLocks 保证并发首调只有一个线程去 Chroma 创建。
+     */
+    private String getOrCreateCollectionId() throws IOException {
+        String cached = cachedCollectionId;
+        if (cached != null) {
+            return cached;
+        }
+
+        Object lock = resolveLocks.computeIfAbsent(collectionName, k -> new Object());
+        synchronized (lock) {
+            if (cachedCollectionId != null) {
+                return cachedCollectionId;
+            }
+
+            String listEndpoint = "/api/v2/tenants/" + tenantName + "/databases/" + databaseName + "/collections";
+            String listResponse = getFromChroma(listEndpoint);
+            JsonNode listRoot = objectMapper.readTree(listResponse);
+            if (listRoot.isArray()) {
+                for (JsonNode node : listRoot) {
+                    if (node.hasNonNull("name") && collectionName.equals(node.get("name").asText())
+                            && node.hasNonNull("id")) {
+                        cachedCollectionId = node.get("id").asText();
+                        log.debug("复用已存在Chroma collection: name={}, id={}", collectionName, cachedCollectionId);
+                        return cachedCollectionId;
+                    }
+                }
+            }
+
+            // 不存在则创建
+            String createEndpoint = listEndpoint;
+            Map<String, Object> requestBody = new LinkedHashMap<>();
+            requestBody.put("name", collectionName);
+
+            String jsonBody = objectMapper.writeValueAsString(requestBody);
+            String createResponse = postToChroma(createEndpoint, jsonBody);
+            JsonNode createRoot = objectMapper.readTree(createResponse);
+            String newId = createRoot.get("id").asText();
+            cachedCollectionId = newId;
+            log.info("新建Chroma collection: name={}, id={}", collectionName, newId);
+            return newId;
+        }
+    }
+
+    /**
+     * 发送HTTP GET请求到Chroma API
+     */
+    private String getFromChroma(String endpoint) throws IOException {
+        URL url = new URL(chromaUrl + endpoint);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setConnectTimeout(30000);
+        conn.setReadTimeout(60000);
+
+        try {
+            int responseCode = conn.getResponseCode();
+            try (BufferedReader br = new BufferedReader(
+                    new InputStreamReader(
+                            responseCode >= 400 ? conn.getErrorStream() : conn.getInputStream(),
+                            StandardCharsets.UTF_8))) {
+                StringBuilder response = new StringBuilder();
+                String line;
+                while ((line = br.readLine()) != null) {
+                    response.append(line);
+                }
+                if (responseCode >= 400) {
+                    throw new IOException("Chroma API error: " + responseCode + " - " + response);
+                }
+                return response.toString();
+            }
+        } finally {
+            conn.disconnect();
+        }
     }
 
     /**
@@ -116,6 +206,7 @@ public class ChromaService {
         String docId = documentId.toString() + "_" + chunkIndex;
 
         try {
+            String collectionId = getOrCreateCollectionId();
             String endpoint = "/api/v2/tenants/" + tenantName + "/databases/" + databaseName + "/collections/" + collectionId + "/add";
 
             Map<String, Object> metadata = new HashMap<>();
@@ -154,6 +245,7 @@ public class ChromaService {
                 return Collections.emptyList();
             }
 
+            String collectionId = getOrCreateCollectionId();
             String endpoint = "/api/v2/tenants/" + tenantName + "/databases/" + databaseName + "/collections/" + collectionId + "/query";
 
             Map<String, Object> requestBody = new LinkedHashMap<>();
@@ -199,6 +291,7 @@ public class ChromaService {
      */
     public void deleteByDocumentId(UUID documentId) {
         try {
+            String collectionId = getOrCreateCollectionId();
             String getEndpoint = "/api/v2/tenants/" + tenantName + "/databases/" + databaseName + "/collections/" + collectionId + "/get";
 
             Map<String, Object> getRequestBody = new LinkedHashMap<>();
@@ -238,4 +331,11 @@ public class ChromaService {
      * 检索结果记录
      */
     public record SearchResult(String content, String documentId, String chunkIndex, double score) {}
+
+    /**
+     * 清除 collectionId 缓存（外部在删除/重建 collection 后调用，避免命中已失效 id）
+     */
+    public void invalidateCollectionIdCache() {
+        this.cachedCollectionId = null;
+    }
 }
