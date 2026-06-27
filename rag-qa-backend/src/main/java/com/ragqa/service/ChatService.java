@@ -1,12 +1,17 @@
 package com.ragqa.service;
 
 import com.ragqa.dto.ChatRequest;
+import com.ragqa.dto.ChatResponse;
+import com.ragqa.model.ChatHistory;
+import com.ragqa.repository.ChatHistoryRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
+
+import java.util.UUID;
 
 /**
  * 问答服务
@@ -31,6 +36,8 @@ public class ChatService {
     private final RagService ragService;
     /** Spring AI ChatClient构建器 */
     private final ChatClient.Builder chatClientBuilder;
+    /** 聊天历史仓库，持久化 user 问题与 AI 回答 */
+    private final ChatHistoryRepository chatHistoryRepository;
     
     /** 是否启用流式输出，配置项：chat.streaming */
     @Value("${chat.streaming:true}")
@@ -38,15 +45,49 @@ public class ChatService {
     
     /**
      * 非流式问答
-     * 
-     * 等待LLM生成完整回答后一次性返回
+     *
+     * 等待LLM生成完整回答后一次性返回，同时把 user 问题和 assistant 回答
+     * 持久化到 chat_history 表（共享同一 sessionId），供前端「聊天历史」展示。
+     *
      * @param request 问答请求（包含问题和知识库ID）
-     * @return 完整回答字符串
+     * @return ChatResponse（含 sessionId 与 answer）
      */
-    public String chat(ChatRequest request) {
+    public ChatResponse chat(ChatRequest request) {
         log.info("收到问答请求: {}", request.getMessage());
-        // 委托给RagService处理
-        return ragService.chat(request.getMessage(), request.getKnowledgeBaseId());
+
+        // 生成本次问答的会话ID，user 与 assistant 两条记录共享
+        String sessionId = UUID.randomUUID().toString();
+
+        // 1. 持久化用户问题（保存失败不阻断问答，只记日志）
+        saveHistory(sessionId, request.getKnowledgeBaseId(), "user", request.getMessage());
+
+        // 2. 委托给 RagService 执行检索增强生成
+        String answer = ragService.chat(request.getMessage(), request.getKnowledgeBaseId());
+
+        // 3. 持久化 AI 回答
+        saveHistory(sessionId, request.getKnowledgeBaseId(), "assistant", answer);
+
+        return new ChatResponse(sessionId, answer);
+    }
+
+    /**
+     * 保存单条聊天历史记录。
+     *
+     * 容错策略：历史记录属于辅助功能，持久化失败不应影响主问答流程，
+     * 因此捕获异常仅记录 warn 日志，不向上抛出。
+     */
+    private void saveHistory(String sessionId, java.util.UUID knowledgeBaseId, String role, String content) {
+        try {
+            ChatHistory history = new ChatHistory();
+            history.setSessionId(sessionId);
+            history.setKnowledgeBaseId(knowledgeBaseId);
+            history.setRole(role);
+            history.setContent(content);
+            chatHistoryRepository.save(history);
+        } catch (Exception e) {
+            log.warn("保存聊天历史失败（不阻断问答）: sessionId={}, role={}, err={}",
+                    sessionId, role, e.getMessage());
+        }
     }
     
     /**

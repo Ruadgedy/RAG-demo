@@ -1,5 +1,7 @@
 package com.ragqa.service;
 
+import com.ragqa.event.DocumentStatusEvent;
+import com.ragqa.event.DocumentStatusEventService;
 import com.ragqa.model.Document;
 import com.ragqa.model.DocumentChunk;
 import com.ragqa.repository.DocumentChunkRepository;
@@ -7,6 +9,7 @@ import com.ragqa.repository.DocumentRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tika.Tika;
+import com.ragqa.config.AsyncConfig;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -57,9 +60,26 @@ public class DocumentProcessService {
     private final OcrService ocrService;
     /** 表格抽取服务 */
     private final TableExtractorService tableExtractor;
+    /** 【2026-06-27 增量】文档状态事件服务 — 用于 SSE 实时推送 */
+    private final DocumentStatusEventService eventService;
 
     /** Apache Tika - 文档解析库，支持PDF、Word、TXT等格式 */
     private final Tika tika = new Tika();
+
+    /**
+     * 保存并发布状态变更事件。
+     * 把 DB 写入 + SSE 推送封装成原子操作（虽然两个操作不是事务性的，
+     * 但 SSE 是 best-effort 推送，丢一两条不影响前端正确性 — 前端有轮询降级兜底）。
+     */
+    private void saveAndEmit(Document doc) {
+        documentRepository.save(doc);
+        try {
+            eventService.emit(doc.getKnowledgeBaseId(), DocumentStatusEvent.from(doc));
+        } catch (Exception e) {
+            // SSE 推送失败不影响主流程，仅记录日志
+            log.warn("Failed to emit doc status event for docId={}: {}", doc.getId(), e.getMessage());
+        }
+    }
 
     /**
      * 异步处理文档
@@ -70,7 +90,7 @@ public class DocumentProcessService {
      * @param documentId 文档ID（数据库中的记录ID）
      * @param filePath 上传文件的存储路径
      */
-    @Async
+    @Async(AsyncConfig.DOCUMENT_PROCESS_EXECUTOR)
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void processDocumentAsync(UUID documentId, Path filePath) {
         try {
@@ -81,7 +101,7 @@ public class DocumentProcessService {
             // ========== 阶段1: 解析文档 ==========
             document.setStatus(Document.DocumentStatus.PARSING);  // 状态：解析中
             document.setProgress(30);                           // 进度：30%
-            documentRepository.save(document);
+            saveAndEmit(document);
             
             // 检查文件是否存在
             if (!Files.exists(filePath)) {
@@ -151,7 +171,7 @@ public class DocumentProcessService {
             // ========== 阶段2: 文本切分 ==========
             document.setStatus(Document.DocumentStatus.CHUNKING);  // 状态：切分中
             document.setProgress(50);                               // 进度：50%
-            documentRepository.save(document);
+            saveAndEmit(document);
             
             // 调用TextSplitter将文本切分为小块
             List<String> chunks = textSplitter.split(text);
@@ -160,7 +180,7 @@ public class DocumentProcessService {
             // ========== 阶段3&4: 向量化与存储 ==========
             document.setStatus(Document.DocumentStatus.EMBEDDING);  // 状态：向量化中
             document.setProgress(70);                               // 进度：70%
-            documentRepository.save(document);
+            saveAndEmit(document);
 
             int successCount = 0;  // 成功计数的切片数
             int failCount = 0;     // 失败计数的切片数
@@ -207,7 +227,7 @@ public class DocumentProcessService {
                 // 更新进度（70% -> 100%）
                 int embedProgress = chunks.isEmpty() ? 100 : 70 + ((i + 1) * 30 / chunks.size());
                 document.setProgress(embedProgress);
-                documentRepository.save(document);
+                saveAndEmit(document);
             }
 
             // ========== 完成 ==========
@@ -230,7 +250,7 @@ public class DocumentProcessService {
             
             document.setProgress(100);                              // 进度：100%
             document.setProcessedAt(LocalDateTime.now());           // 处理完成时间
-            documentRepository.save(document);
+            saveAndEmit(document);
             log.info("文档处理完成，切片数量: {}", successCount);
 
         } catch (Exception e) {
@@ -240,7 +260,7 @@ public class DocumentProcessService {
                 Document document = documentRepository.findById(documentId).orElseThrow();
                 document.setStatus(Document.DocumentStatus.FAILED);
                 document.setErrorMessage(e.getMessage());
-                documentRepository.save(document);
+                saveAndEmit(document);
             } catch (Exception ex) {
                 log.error("更新文档状态失败: {}", ex.getMessage());
             }

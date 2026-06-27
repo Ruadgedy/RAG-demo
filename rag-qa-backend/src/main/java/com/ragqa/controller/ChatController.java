@@ -1,6 +1,7 @@
 package com.ragqa.controller;
 
 import com.ragqa.dto.ChatRequest;
+import com.ragqa.dto.ChatResponse;
 import com.ragqa.service.ChatService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -8,6 +9,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -41,18 +43,18 @@ public class ChatController {
 
     private final ChatService chatService;
 
-    @Operation(summary = "问答（普通）", description = "基于知识库内容进行问答，等待完整回答后返回")
+    @Operation(summary = "问答（普通）", description = "基于知识库内容进行问答，等待完整回答后返回；同时把问答记录持久化到聊天历史")
     @ApiResponses(value = {
             @ApiResponse(responseCode = "200", description = "问答成功",
-                    content = @Content(mediaType = "text/plain", schema = @Schema(type = "string"))),
+                    content = @Content(schema = @Schema(implementation = ChatResponse.class))),
             @ApiResponse(responseCode = "401", description = "未认证"),
             @ApiResponse(responseCode = "404", description = "知识库不存在"),
             @ApiResponse(responseCode = "500", description = "服务器内部错误")
     })
     @PostMapping
-    public ResponseEntity<String> chat(@RequestBody ChatRequest request) {
-        String answer = chatService.chat(request);
-        return ResponseEntity.ok(answer);
+    public ResponseEntity<ChatResponse> chat(@Valid @RequestBody ChatRequest request) {
+        ChatResponse response = chatService.chat(request);
+        return ResponseEntity.ok(response);
     }
 
     @Operation(summary = "问答（流式）", description = "基于知识库内容进行问答，通过 SSE 实时推送回答片段")
@@ -63,7 +65,7 @@ public class ChatController {
             @ApiResponse(responseCode = "404", description = "知识库不存在")
     })
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<String> streamChat(@RequestBody ChatRequest request) {
+    public Flux<String> streamChat(@Valid @RequestBody ChatRequest request) {
         return chatService.streamChat(request);
     }
 }

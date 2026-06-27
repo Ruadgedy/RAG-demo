@@ -154,6 +154,13 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Spring Security Test (用于 SecurityMockMvcRequestPostProcessors) -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!-- H2 Database for Testing -->
         <dependency>
             <groupId>com.h2database</groupId>
