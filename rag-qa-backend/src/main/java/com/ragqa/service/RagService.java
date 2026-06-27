@@ -52,6 +52,17 @@ public class RagService {
     private int TOP_K;
 
     /**
+     * Fallback 检索最大加载切片数（防 OOM）
+     *
+     * 【为什么需要】fallbackRetrieve 把所有 chunk 向量加载到内存做余弦相似度，
+     * 4096 维 × N chunks 会占用大量堆内存。高并发场景下，单次请求可能吃光 JVM 堆。
+     *
+     * 默认 5000 切片 ≈ 80MB / 请求（4096 维 × 4 字节 × 5000）。超过则截断 + 警告。
+     */
+    @Value("${retrieval.fallback.max-chunks:5000}")
+    private int fallbackMaxChunks;
+
+    /**
      * 检索结果记录
      * @param content 文档切片内容
      * @param source 来源标识（documentId_chunkIndex）
@@ -132,16 +143,25 @@ public class RagService {
         try {
             // 1. 从Chroma获取最相似的文档切片
             List<ChromaService.SearchResult> results = chromaService.similaritySearch(query, TOP_K);
-            
-            // 2. 过滤：只保留属于该知识库且状态为COMPLETED的文档
+
+            if (results.isEmpty()) {
+                return Collections.emptyList();
+            }
+
+            // 2. 一次性查询该知识库下所有 COMPLETED 状态的文档，构建 Set 用于 O(1) 过滤
+            // 【修复 N+1】原代码每个 Chroma 结果都执行一次 findByKnowledgeBaseId，
+            // TopK=20 就是 20 次查询。现改为一次查询 + Set.contains()
+            Set<UUID> validDocIds = documentRepository.findByKnowledgeBaseId(knowledgeBaseId).stream()
+                    .filter(doc -> doc.getStatus() == Document.DocumentStatus.COMPLETED)
+                    .map(Document::getId)
+                    .collect(Collectors.toSet());
+
+            // 3. 过滤：只保留属于该知识库且状态为COMPLETED的文档
             return results.stream()
                     .filter(r -> {
                         try {
                             UUID docId = UUID.fromString(r.documentId());
-                            // 检查文档是否属于该知识库且已完成处理
-                            return documentRepository.findByKnowledgeBaseId(knowledgeBaseId).stream()
-                                    .anyMatch(doc -> doc.getId().equals(docId) && 
-                                        doc.getStatus() == Document.DocumentStatus.COMPLETED);
+                            return validDocIds.contains(docId);
                         } catch (Exception e) {
                             return false;
                         }
@@ -170,33 +190,43 @@ public class RagService {
     /**
      * 回退方案：从MySQL数据库检索
      * 
-     * 当Chroma不可用时，直接从数据库加载所有文档切片，
+//     * 当Chroma不可用时，直接从数据库加载所有文档切片，
      * 在内存中计算相似度（效率较低，但作为备份方案）
      */
     private List<RetrievalResult> fallbackRetrieve(String query, UUID knowledgeBaseId) {
         List<RetrievalResult> results = new ArrayList<>();
-        
+
         // 1. 将问题转换为向量
         float[] queryEmbedding = embeddingService.embed(query);
-        
+
         // 2. 遍历知识库中的所有文档
         var documents = documentRepository.findByKnowledgeBaseId(knowledgeBaseId);
-        
+
+        int totalChunksLoaded = 0;
+        boolean truncated = false;
+
         for (var doc : documents) {
             // 只处理已完成处理的文档
             if (doc.getStatus() != Document.DocumentStatus.COMPLETED) {
                 continue;
             }
-            
+
             // 3. 获取该文档的所有切片
             var chunks = documentChunkRepository.findByDocumentId(doc.getId());
-            
+
             // 4. 计算每个切片与问题的相似度
             for (var chunk : chunks) {
+                // 【OOM 防护】超过阈值后停止加载，避免单请求耗尽 JVM 堆
+                if (totalChunksLoaded >= fallbackMaxChunks) {
+                    truncated = true;
+                    break;
+                }
+                totalChunksLoaded++;
+
                 // 从数据库读取存储的向量字符串
                 String embeddingStr = chunk.getEmbedding();
                 float[] chunkEmbedding = parseEmbedding(embeddingStr);
-                
+
                 if (chunkEmbedding.length > 0) {
                     // 计算余弦相似度
                     double similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
@@ -207,8 +237,17 @@ public class RagService {
                     ));
                 }
             }
+
+            if (truncated) {
+                break;
+            }
         }
-        
+
+        if (truncated) {
+            log.warn("Fallback 检索达到最大切片数限制 {}，结果可能不完整。建议修复 Chroma 服务后回切正常检索路径。",
+                    fallbackMaxChunks);
+        }
+
         // 5. 按相似度降序排序，返回TopK个结果
         results.sort((a, b) -> Double.compare(b.score(), a.score()));
         return results.stream().limit(TOP_K).toList();

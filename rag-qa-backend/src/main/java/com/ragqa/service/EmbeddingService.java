@@ -5,9 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -45,7 +48,16 @@ import java.util.List;
 @Slf4j
 public class EmbeddingService {
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    /**
+     * RestTemplate 配置：连接超时 5s，读取超时 30s
+     *
+     * 【为什么必须设置超时】
+     * RestTemplate 默认无超时。如果 Ollama 服务挂起、慢响应或网络分区，
+     * HTTP 请求线程会被永久阻塞，最终拖垮整个 Tomcat 线程池。
+     * 设置超时后，异常会被 catch 捕获（log + 返回空数组），保证请求链路有界。
+     */
+    private final RestTemplate restTemplate;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /** Ollama服务地址，默认 http://localhost:11434 */
@@ -55,6 +67,16 @@ public class EmbeddingService {
     /** embedding模型名称，默认 qwen3-embedding:4b */
     @Value("${OLLAMA_EMBEDDING_MODEL:qwen3-embedding:4b}")
     private String modelName;
+
+    /**
+     * 构造方法：配置 RestTemplate 超时
+     */
+    public EmbeddingService() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout((int) Duration.ofSeconds(5).toMillis());
+        factory.setReadTimeout((int) Duration.ofSeconds(30).toMillis());
+        this.restTemplate = new RestTemplate(factory);
+    }
 
     /**
      * 将单个文本转换为向量
@@ -116,6 +138,9 @@ public class EmbeddingService {
                 }
                 return result;
             }
+        } catch (ResourceAccessException e) {
+            // 连接超时 / 读取超时（Ollama 挂了或慢响应）
+            log.error("向量化超时或网络异常: {}", e.getMessage());
         } catch (Exception e) {
             log.error("向量化失败: {}", e.getMessage());
         }
