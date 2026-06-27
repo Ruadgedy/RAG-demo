@@ -700,6 +700,8 @@ body {
 
 .messages {
   flex: 1;
+  min-height: 0;          /* 【修复 2026-06-27】Flexbox 列布局关键：允许 flex item 收缩至内容尺寸以下，
+                                       否则超长消息会把 .input-area 挤出可视区域 */
   padding: 20px;
   overflow-y: auto;
 }
@@ -804,20 +806,25 @@ body {
 }
 
 .input-area {
+  flex-shrink: 0;         /* 【修复 2026-06-27】保证输入区不被 .messages 挤压 */
   padding: 16px 20px;
   border-top: 1px solid #e5e7eb;
+  background: #fff;       /* 防止被滚动消息透出 */
   display: flex;
   gap: 12px;
 }
 
 .input-area textarea {
   flex: 1;
+  min-height: 44px;       /* 单行最小高度 */
+  max-height: 120px;      /* 【修复 2026-06-27】多行输入也不撑爆父容器 */
   padding: 12px 16px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   font-size: 14px;
   resize: none;
   font-family: inherit;
+  overflow-y: auto;       /* 内容超过 max-height 时内部滚动 */
 }
 
 .input-area textarea:focus {
