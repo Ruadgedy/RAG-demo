@@ -11,13 +11,80 @@
   - Spring Security + JWT认证
   - 后端API: /api/auth/register, /api/auth/login
   - 前端登录页面和路由守卫
+- Feature #26 (2026-06-27): P0 安全与稳定性修复
+  - `Bm25SearchService` 线程安全：ReentrantReadWriteLock + ConcurrentHashMap
+  - `Bm25SearchService.removeByDocumentId()` 新增（按 documentId 删除 chunk）
+  - `DocumentProcessRecoveryScheduler` 新增：定时清理卡死的 PROCESSING 文档
+  - 线程池配置：`AsyncConfig.documentProcessExecutor`（core=4, max=8, queue=100）
+  - `DocumentRepository.findStuckDocuments()` 新增（JPQL 自定义查询）
+- Feature #32 (2026-06-27): Chroma Collection 409 修复（P0 功能阻塞）
+  - `ChromaService.getOrCreateCollectionId()` 改造：先 GET 列表按 `name` 命中复用 id，不存在才 POST 创建
+  - 新增 `cachedCollectionId`（volatile）+ `resolveLocks`（tenant 级锁）保证并发首调安全
+  - 新增 `getFromChroma(endpoint)` 通用 GET helper（之前只有 POST helper）
+  - 新增 `invalidateCollectionIdCache()` 供外部（KB 删除/重建）手动失效缓存
+  - 影响：每文档 71 切片场景下，向量化从 `成功: 0, 失败: 71` → `成功: 71, 失败: 0`，Chroma 实际入库 71 条向量，日志 0 个 409
+  - 测试：54/54 后端单元测试通过 + E2E `cloud.pdf` 完整跑通（COMPLETED）
+
+- Feature #31 (2026-06-27): 文档状态实时同步（SSE 推送）
+  - **后端**：
+    - `DocumentStatusEvent` record 新增（不可变事件对象）
+    - `DocumentStatusEventService` 新增：基于 Reactor `Sinks.Many` 的事件总线（multicast + buffer(100)）
+    - `DocumentController.streamDocumentStatus()` 新增：`GET /api/knowledge-bases/{kbId}/documents/stream`，返回 `Flux<ServerSentEvent<String>>`，自定义事件名 `doc-status`
+    - `DocumentProcessService` 在 5 个状态变更点（PARSING/CHUNKING/EMBEDDING/循环/COMPLETED/FAILED）调用 `eventService.emit()`
+    - SSE 端点鉴权：Spring Security + 控制器内 query param token 双重保障（兼容 EventSource 无法设置 header）
+    - `GlobalExceptionHandler` 新增 `SecurityException → 401` 处理
+  - **前端**：
+    - `useToast` composable 新增：全局非阻塞 Toast 通知队列（替代 `alert()`）
+    - `ToastContainer.vue` 组件新增：右上角弹出，`<TransitionGroup>` 平滑动画，4 种类型（success/error/warning/info）
+    - `useDocumentStream` composable 新增：EventSource + 指数退避重连（1s/2s/4s/8s/15s/30s，最多 6 次）+ 失败降级轮询（3s）
+    - `ChatView.vue` 重构：
+      - 删除 `alert()` 调用（0 个剩余）
+      - 删除 `setInterval` 轮询（替换为 SSE composable）
+      - 上传后乐观插入：立即把后端返回的 Document push 到列表（无需等待 SSE）
+      - 新增 `onUnmounted` 清理 EventSource 和 setInterval
+      - API_BASE 改用 Vite proxy 同源路径 `/api`
 
 ### Changed
 - MiniMax模型配置修复: abab5.5-chat → MiniMax-M2.5
+- Spring AI 升级 1.0.x → 1.1.x（参考 BOM）
+- `KnowledgeBaseService.delete()` 增加级联清理：Chroma 向量 + BM25 索引 + 本地文件
+- `DocumentService.deleteDocument()` 同步清理 BM25 索引
+- `DocumentService.uploadDocument()` 增加路径遍历双层防御
+- `RagService.retrieve()` 消除 N+1 数据库查询
+- `RagService.fallbackRetrieve()` 增加 `fallbackMaxChunks` 上限防 OOM
+- `EmbeddingService` 增加 5s/30s 超时配置
+- `JwtService` 启动时强制校验 JWT_SECRET 长度 ≥ 32 字节
+- `application.properties` 的 `jwt.secret` 改为 `${JWT_SECRET:}`（必须环境变量注入）
+- `RagQaApplication` 加 `@EnableScheduling`
 
 ### Fixed
 - MiniMax API调用失败问题（模型名称错误）
 - 用户注册登录功能
+- 删除知识库时 Chroma/BM25/本地文件残留（2026-06-27）
+- 删除文档时 BM25 索引残留（2026-06-27）
+- BM25 多线程并发导致 ConcurrentModificationException / 死循环（2026-06-27）
+- RAG 检索 N+1 数据库查询性能问题（2026-06-27）
+- EmbeddingService 无超时导致 Tomcat 线程池雪崩风险（2026-06-27）
+- 文件上传路径遍历安全漏洞（2026-06-27）
+- 文档处理异步任务因服务重启永远卡在 PROCESSING（2026-06-27）
+- JWT Secret 硬编码导致生产部署密钥泄露风险（2026-06-27）
+- Chroma v2 API 强制同名 collection 唯一导致向量化 71/71 失败（2026-06-27）
+
+### Security
+- 🔴 修复路径遍历漏洞（CVE 类别：Path Traversal）
+- 🔴 修复 JWT 弱密钥配置（CVE 类别：Hard-coded Credentials）
+
+### Tests
+- 测试覆盖从 27 个 → 44 个
+- 新增 `Bm25SearchServiceTest` 完整单元测试（含并发安全测试）
+- 新增路径遍历 3 个攻击向量测试
+- 新增 KnowledgeBaseService 级联清理 4 个测试
+
+---
+
+## [已发布版本]
+
+_暂无_
 
 ---
 

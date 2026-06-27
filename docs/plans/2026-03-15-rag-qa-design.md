@@ -2,10 +2,11 @@
 
 | 项目 | 内容 |
 |------|------|
-| **日期** | 2026-03-15 |
+| **日期** | 2026-03-15（初版），2026-06-27（增量更新） |
 | **状态** | 已审批 |
 | **SRS参考** | docs/plans/2026-03-15-rag-qa-srs.md |
 | **UCD参考** | docs/plans/2026-03-15-rag-qa-ucd.md |
+| **本次增量** | P0 安全与稳定性修复（见 §9 变更日志） |
 
 ---
 
@@ -126,10 +127,10 @@ classDiagram
         +LocalDateTime updatedAt
         +List~Document~ documents
         +create()
-        +delete()
+        +delete()    // 2026-06-27 增强：级联清理外部资源
         +update()
     }
-    
+
     class Document {
         +String id
         +String knowledgeBaseId
@@ -139,8 +140,9 @@ classDiagram
         +String status
         +LocalDateTime uploadedAt
         +process()
+        +deleteDocument()  // 2026-06-27 增强：同步清理 BM25 索引
     }
-    
+
     class Chunk {
         +String id
         +String documentId
@@ -148,9 +150,29 @@ classDiagram
         +float[] embedding
         +int chunkIndex
     }
-    
+
+    class Bm25SearchService {
+        -Map documents
+        -Map invertedIndex
+        -Map docLengths
+        -ReentrantReadWriteLock lock  // 2026-06-27 新增：线程安全
+        +addDocument()
+        +removeByDocumentId()  // 2026-06-27 新增
+        +search()
+        +clear()
+    }
+
+    class ChromaService {
+        +addDocument()
+        +similaritySearch()
+        +deleteByDocumentId()
+    }
+
     KnowledgeBase "1" --> "*" Document
     Document "1" --> "*" Chunk
+    KnowledgeBaseService --> Bm25SearchService : cascade cleanup
+    KnowledgeBaseService --> ChromaService : cascade cleanup
+    DocumentService --> Bm25SearchService : cleanup on delete
 ```
 
 #### 时序图：创建知识库
@@ -162,7 +184,7 @@ sequenceDiagram
     participant S as KnowledgeService
     participant KB as KnowledgeBase
     participant DB as ChromaDB
-    
+
     U->>C: POST /api/knowledge-bases
     C->>S: createKnowledgeBase(name)
     S->>KB: new KnowledgeBase(name)
@@ -173,6 +195,52 @@ sequenceDiagram
     C-->>U: 201 Created
 ```
 
+#### 时序图：删除知识库（含级联清理，2026-06-27 修复）
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant C as KnowledgeBaseController
+    participant S as KnowledgeBaseService
+    participant DR as DocumentRepository
+    participant CS as ChromaService
+    participant BM as Bm25SearchService
+    participant FS as FileSystem
+    participant DB as MySQL
+
+    U->>C: DELETE /api/knowledge-bases/{id}
+    C->>S: delete(id)
+    S->>DR: findByKnowledgeBaseId(id)
+    DR-->>S: List<Document>
+
+    loop 对每个 Document
+        S->>CS: deleteByDocumentId(docId)
+        CS-->>S: void (容错：失败仅 warn)
+        S->>BM: removeByDocumentId(docId)
+        BM-->>S: int removed (容错：失败仅 warn)
+        S->>FS: Files.deleteIfExists(filePath)
+        FS-->>S: void (容错：失败仅 warn)
+    end
+
+    S->>DB: repository.delete(kb)
+    Note over DB: FK ON DELETE CASCADE 自动清理<br/>document + document_chunk
+
+    S-->>C: void
+    C-->>U: 204 No Content
+```
+
+**级联清理链路设计**：
+
+| 资源 | 清理方式 | 容错策略 |
+|------|----------|----------|
+| MySQL `document` / `document_chunk` | FK `ON DELETE CASCADE` 自动级联 | 由 @Transactional 保证整体回滚 |
+| MySQL `chat_history.knowledge_base_id` | FK `ON DELETE SET NULL` | 同上 |
+| Chroma 向量 | `chromaService.deleteByDocumentId()` | 独立 try-catch，失败仅 warn |
+| BM25 内存索引 | `bm25Service.removeByDocumentId()` | 独立 try-catch，失败仅 warn |
+| 本地文件 | `Files.deleteIfExists()` | 独立 try-catch，失败仅 warn |
+
+**关键设计决策**：删除 KB 前**必须先调用 `documentRepository.findByKnowledgeBaseId(id)` 抓快照**——一旦执行 `repository.delete(kb)`，FK CASCADE 会瞬间清空 `document` 表，事后无法获取 docId 列表来清理 Chroma/BM25/文件。
+
 ### 2.2 文档上传与处理
 
 #### 类设计
@@ -180,62 +248,138 @@ sequenceDiagram
 ```mermaid
 classDiagram
     class DocumentService {
-        +uploadDocument(file, kbId)
-        +deleteDocument(docId)
+        +uploadDocument(file, kbId)  // 2026-06-27 增强：路径遍历防护
+        +deleteDocument(docId)       // 2026-06-27 增强：同步清理 BM25 索引
         +getDocuments(kbId)
     }
-    
+
     class DocumentParser {
         +parse(file): String
         +supports(fileType): boolean
     }
-    
+
     class PDFParser {
         +parse(file): String
     }
-    
+
     class DocxParser {
         +parse(file): String
     }
-    
+
     class TxtParser {
         +parse(file): String
     }
-    
+
     class TextSplitter {
-        +split(text, chunkSize, overlap): List~String~
+        +split(text, chunkSize, overlap): List<String>
     }
-    
+
     class EmbeddingService {
-        +generateEmbedding(text): float[]
-        +batchGenerate(texts): List~float[]~
+        -SimpleClientHttpRequestFactory  // 2026-06-27 新增：超时配置
+        +embed(text): float[]
+        +embed(List<String>): List<float[]>
     }
-    
+
+    class DocumentProcessService {
+        -Tika tika
+        +processDocumentAsync()  // @Async + @Transactional(REQUIRES_NEW)
+    }
+
+    class DocumentProcessRecoveryScheduler {
+        -DocumentRepository
+        -timeoutMinutes: int      // 默认 30
+        -intervalMs: long         // 默认 5 分钟
+        +recoverStuckDocuments()  // 2026-06-27 新增：定时清理卡死任务
+    }
+
     DocumentService --> DocumentParser
     DocumentParser <|-- PDFParser
     DocumentParser <|-- DocxParser
     DocumentParser <|-- TxtParser
     DocumentService --> TextSplitter
     DocumentService --> EmbeddingService
+    DocumentService --> DocumentProcessService : 异步处理
+    DocumentProcessRecoveryScheduler --> DocumentRepository : @Scheduled 扫描
 ```
 
-#### 流程图：文档处理
+#### 流程图：文档处理（2026-06-27 强化版）
 
 ```mermaid
 flowchart TD
     Start([上传文档]) --> A1{文件类型检查}
-    A1 -->|支持| B1[保存文件到本地]
     A1 -->|不支持| E1[返回错误]
-    
-    B1 --> B2[解析文档内容]
-    B2 --> B3[文本分块]
-    B3 --> B4[生成向量嵌入]
-    B4 --> B5[存储到Chroma]
-    B5 --> B6[更新文档状态]
-    B6 --> End([完成])
-    
+    A1 -->|支持| A2{文件名路径遍历检查}
+    A2 -->|含 / 或 \ | E2[返回非法文件名]
+    A2 -->|合法| B1[保存文件到本地]
+
+    B1 --> B2[保存 Document 记录<br/>status=UPLOADING, progress=10]
+    B2 --> B3[异步触发 processDocumentAsync]
+    B3 --> B4[解析文档内容]
+    B4 --> B5[文本分块]
+    B5 --> B6[生成向量嵌入]
+    B6 --> B7[存储到 Chroma + BM25 + MySQL]
+    B7 --> B8[更新文档状态为 COMPLETED]
+    B8 --> End([完成])
+
+    B4 -.异常.-> C1[catch 异常]
+    C1 --> C2[更新状态为 FAILED]
+
+    subgraph Recovery["后台定时任务（每 5 分钟）"]
+        R1[扫描 PROCESSING 状态超过 30 分钟的文档]
+        R2 --> R3[自动标记为 FAILED]
+    end
+
     E1 --> End
+    E2 --> End
+    C2 --> End
+    R3 --> End
 ```
+
+#### 路径遍历防护设计（2026-06-27 新增）
+
+`DocumentService.uploadDocument` 采用**两层防御**：
+
+```java
+// 第一层：拒绝任何包含路径分隔符的文件名
+if (fileName != null && (fileName.contains("/") || fileName.contains("\\"))) {
+    throw new IllegalArgumentException("非法文件名: " + fileName);
+}
+
+// 第二层：getFileName + normalize + 边界校验（防御 NUL 字节等）
+Path filePath = uploadPath.resolve(Paths.get(fileName).getFileName()).normalize();
+if (!filePath.startsWith(uploadRoot)) {
+    throw new IllegalArgumentException("非法文件名: " + fileName);
+}
+```
+
+**为什么不能只用 `getFileName()`**：`Paths.get("../../etc/passwd.pdf").getFileName()` 返回 `"passwd.pdf"`，单独的边界校验无法发现 `../` 攻击——必须前置显式分隔符检查。
+
+**为什么不能只用分隔符检查**：NUL 字节注入（`passwd.pdf\0.jpg`）、Unicode 同形字符攻击等需要 `normalize()` 兜底。
+
+#### 状态机卡死检测设计（2026-06-27 新增）
+
+```
+┌─────────────────┐
+│  UPLOADING      │ ─┐
+├─────────────────┤  │
+│  PARSING        │  ├─ 超过 30 分钟 → 自动 FAILED
+├─────────────────┤  │  （DocumentProcessRecoveryScheduler）
+│  CHUNKING       │  │  （每 5 分钟扫描一次）
+├─────────────────┤  │
+│  EMBEDDING      │ ─┘
+└─────────────────┘
+```
+
+**触发原因**：服务重启 / OOM Kill / 节点宕机 → 异步处理任务被强制终止 → 文档永远卡在中间态。
+
+**修复配置**（`application.properties`）：
+
+```properties
+document.recovery.timeout-minutes=30
+document.recovery.interval-ms=300000
+```
+
+**主类启用**：`RagQaApplication` 加 `@EnableScheduling`。
 
 ### 2.3 智能问答
 
@@ -247,63 +391,94 @@ classDiagram
         +chat(message, kbId, history)
         +streamChat(message, kbId, history)
     }
-    
-    class RAGEngine {
-        +retrieve(query, kbId, topK)
-        +generate(prompt)
-        +buildPrompt(query, context, history)
+
+    class RagService {
+        -TOP_K: int
+        -fallbackMaxChunks: int  // 2026-06-27 新增：fallback OOM 防护
+        +chat(message, kbId)
+        -retrieve(query, kbId)    // 2026-06-27 优化：消除 N+1
+        -fallbackRetrieve()       // 2026-06-27 优化：加载上限
+        +retrieveForStreaming()
     }
-    
-    class VectorStore {
+
+    class ChromaService {
+        -HttpURLConnection
         +similaritySearch(query, topK)
-        +addDocuments(chunks)
-        +deleteCollection()
+        +addDocument(docId, idx, content, embedding)
+        +deleteByDocumentId(docId)
     }
-    
-    class ChatHistory {
-        +String id
-        +String knowledgeBaseId
-        +List~Message~ messages
-        +addMessage(role, content)
-        +getContext(windowSize)
+
+    class Bm25SearchService {
+        -ReentrantReadWriteLock  // 2026-06-27 新增：线程安全
+        -Map documents
+        -Map invertedIndex
+        +addDocument()
+        +removeByDocumentId()  // 2026-06-27 新增
+        +search()
     }
-    
-    class Message {
-        +String role
-        +String content
-        +LocalDateTime timestamp
-        +List~String~ references
+
+    class EmbeddingService {
+        -SimpleClientHttpRequestFactory  // 2026-06-27 新增：5s/30s 超时
+        +embed(text): float[]
     }
-    
-    ChatService --> RAGEngine
-    RAGEngine --> VectorStore
-    ChatService --> ChatHistory
-    ChatHistory --> Message
+
+    ChatService --> RagService
+    RagService --> ChromaService
+    RagService --> Bm25SearchService
+    RagService --> EmbeddingService
 ```
 
-#### 时序图：问答流程
+#### 时序图：问答流程（2026-06-27 优化后）
 
 ```mermaid
 sequenceDiagram
     participant U as 用户
     participant C as Controller
     participant S as ChatService
-    participant R as RAGEngine
-    participant V as VectorStore
+    participant R as RagService
+    participant CS as ChromaService
+    participant DR as DocumentRepository
     participant L as LLM
-    
+
     U->>C: POST /api/chat
-    C->>S: chat(message, kbId, history)
-    S->>R: retrieve(query, kbId)
-    R->>V: similaritySearch(query, topK=5)
-    V-->>R: context chunks
-    R->>R: buildPrompt(query, context, history)
+    C->>S: chat(message, kbId)
+    S->>R: chat(message, kbId)
+    R->>CS: similaritySearch(query, TOP_K)
+    CS-->>R: List<SearchResult>
+
+    Note over R,DR: 2026-06-27 优化：N+1 → 1 次查询
+    R->>DR: findByKnowledgeBaseId(kbId) [1 次]
+    DR-->>R: List<Document>
+    R->>R: 过滤 Set<UUID> 匹配（O(1)）
+
+    R->>R: buildPrompt(context, query)
     R->>L: generate(prompt)
     L-->>R: answer
     R-->>S: answer
     S-->>C: ChatResponse
     C-->>U: answer
 ```
+
+#### 检索性能优化（2026-06-27 修复）
+
+| 项 | 修复前 | 修复后 |
+|----|--------|--------|
+| Chroma 返回 N 个结果的 DB 查询次数 | **N 次**（每次 `findByKnowledgeBaseId`） | **1 次**（提前查询缓存到 `Set<UUID>`） |
+| 过滤算法 | O(N × M) 数据库往返 | O(N + M) 内存 Set.contains |
+| Fallback 检索最大加载 | 无限（OOM 风险） | **5000 个 chunk**（`fallbackMaxChunks`） |
+
+#### EmbeddingService 超时设计（2026-06-27 新增）
+
+```java
+SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+factory.setConnectTimeout(5_000);   // 连接超时 5s
+factory.setReadTimeout(30_000);      // 读取超时 30s
+this.restTemplate = new RestTemplate(factory);
+```
+
+**为什么必须设置超时**：原 RestTemplate 默认无超时。Ollama 服务挂起 / 慢响应 / 网络分区时，HTTP 请求线程会被永久阻塞，最终拖垮整个 Tomcat 线程池。
+
+**异常处理**：捕获 `ResourceAccessException`（超时/网络异常）→ log + 返回空数组，不抛异常给上层。
 
 ---
 
@@ -644,10 +819,316 @@ graph LR
 |------|------|----------|
 | 开源模型效果不佳 | 问答质量 | 预留切换到商业模型接口 |
 | 大文档处理超时 | 上传失败 | 异步处理 + 进度展示 |
-| Chroma并发问题 | 性能瓶颈 | 评估后考虑切换Milvus |
+| Chroma 并发问题 | 性能瓶颈 | 评估后考虑切换 Milvus |
+| **BM25 索引并发不安全**（2026-06-27 修复）| ConcurrentModificationException / 死循环 | 改用 `ReentrantReadWriteLock`，idfCache 用 `ConcurrentHashMap` |
+| **RAG 检索 N+1 查询**（2026-06-27 修复）| TopK×次数 DB 查询 | 提前 `findByKnowledgeBaseId` → `Set<UUID>.contains` |
+| **Fallback 全量加载 OOM**（2026-06-27 修复）| 4096 维 × N chunks 占满堆 | 引入 `fallbackMaxChunks` 上限（默认 5000） |
+| **EmbeddingService 无超时**（2026-06-27 修复）| Tomcat 线程池雪崩 | `SimpleClientHttpRequestFactory` 设 5s/30s 超时 |
+| **文件上传路径遍历**（2026-06-27 修复）| 攻击者越权写文件 | 双层防御：分隔符检查 + normalize + 边界校验 |
+| **文档处理状态机卡死**（2026-06-27 修复）| 服务重启后任务永远卡中间态 | `DocumentProcessRecoveryScheduler` 每 5 分钟扫描 |
+| **JWT Secret 硬编码**（2026-06-27 修复）| 攻击者可伪造 token | 强制 `JWT_SECRET` 环境变量 + 启动校验 ≥32 字节 |
+| **删除知识库数据残留**（2026-06-27 修复）| Chroma/BM25/文件孤儿 | `KnowledgeBaseService.delete` 级联清理三处外部资源 |
 
 ---
 
 **设计文档状态：已审批**
 
+---
+
+## 9. 变更日志
+
+### 9.1 2026-06-27：P0 安全与稳定性修复
+
+**背景**：完成接手后的代码审查 + 全量测试套件修复后，识别出 8 项高风险点并实施修复。
+
+**修复明细**：
+
+| ID | 类别 | 文件 | 改动 |
+|----|------|------|------|
+| FIX-001 | 并发安全 | `Bm25SearchService.java` | 新增 `ReentrantReadWriteLock`；idfCache 改 `ConcurrentHashMap` |
+| FIX-002 | 并发安全 | `Bm25SearchService.java` | 新增 `removeByDocumentId(documentId)` 方法 |
+| FIX-003 | 数据完整性 | `KnowledgeBaseService.java` | `delete()` 加级联清理：Chroma 向量 + BM25 索引 + 本地文件 |
+| FIX-004 | 数据完整性 | `DocumentService.java` | `deleteDocument()` 同步清理 BM25 索引 |
+| FIX-005 | 性能 | `RagService.java` | `retrieve()` 消除 N+1 查询（TopK×次 → 1 次） |
+| FIX-006 | 性能 | `RagService.java` | `fallbackRetrieve()` 加 `fallbackMaxChunks` 防 OOM |
+| FIX-007 | 稳定性 | `EmbeddingService.java` | RestTemplate 设 5s/30s 超时；捕获 `ResourceAccessException` |
+| FIX-008 | 安全 | `DocumentService.java` | `uploadDocument()` 路径遍历双层防御 |
+| FIX-009 | 可靠性 | `DocumentProcessRecoveryScheduler.java`（新） | `@Scheduled` 定时清理卡死文档 |
+| FIX-010 | 安全 | `JwtService.java` + `application.properties` | 强制 `JWT_SECRET` 环境变量；启动校验 ≥32 字节 |
+
+**新增文件**：
+- `service/DocumentProcessRecoveryScheduler.java` — 状态机恢复调度器
+- `test/service/Bm25SearchServiceTest.java` — BM25 索引单元测试（含并发测试）
+
+**改动文件**（主代码 8 个 + 测试 4 个）：
+- 主代码：`Bm25SearchService.java`、`KnowledgeBaseService.java`、`DocumentService.java`、`RagService.java`、`EmbeddingService.java`、`JwtService.java`、`RagQaApplication.java`、`application.properties`
+- 测试：`KnowledgeBaseServiceTest.java`、`DocumentServiceTest.java`、`Bm25SearchServiceTest.java`（新）
+
+**测试覆盖**：
+- 修复前：27 个测试（部分失败）
+- 修复后：**44 个测试全部通过**
+
+新增关键测试：
+- `shouldRejectPathTraversalFilename` — `../../etc/passwd.pdf` 攻击拦截
+- `shouldRejectAbsolutePathFilename` — `/etc/passwd.pdf` 拦截
+- `shouldRejectBackslashPathFilename` — `..\\..\\windows\\evil.pdf` 拦截
+- `shouldHandleConcurrentReadsAndWrites` — 8 reader + 2 writer 100 次迭代无异常
+
+**部署注意事项**：
+1. **必须设置 `JWT_SECRET` 环境变量**（≥ 32 字节 Base64 编码），启动会校验缺失
+   ```bash
+   export JWT_SECRET=$(openssl rand -base64 32)
+   ```
+2. Chroma / Ollama 不可用时，`EmbeddingService` 和 `KnowledgeBaseService.delete()` 不再阻塞但会写 warn 日志
+3. 调度任务 `document.recovery.interval-ms=300000`（5 分钟）可根据业务量调整
+
+### 9.2 2026-03-15：初版
+
+详见正文各章节。
+
+### 9.3 2026-06-27 SSE 增量
+
+| 修复 ID | 关联需求 | 简述 |
+|---------|----------|------|
+| FIX-011 | FR-002 / NFR-007 | 引入 Sinks.Many 事件总线 |
+| FIX-012 | FR-002 | 新增 SSE 端点 + query param token 鉴权 |
+| FIX-013 | FR-002 | DocumentProcessService 集成事件发布 |
+| FIX-014 | FR-002 / NFR-005 | 前端 EventSource composable + 乐观插入 |
+| FIX-015 | NFR-007 | SSE 失败自动降级到轮询 |
+| FIX-016 | NFR-005 | 全局 Toast 通知系统（替代 alert） |
+
+### 9.4 2026-06-27 Chroma 409 修复
+
+| 修复 ID | 关联需求 | 简述 |
+|---------|----------|------|
+| FIX-017 | FR-002 / NFR-007 | ChromaService `getOrCreateCollectionId()` 改造：先 GET 列表按 name 命中返回 id，不存在再 POST 创建；加 volatile 缓存 + tenant 级锁避免并发首调竞态；新增 `invalidateCollectionIdCache()` |
+
+**问题现象**：每片切片 add 时无脑 POST 创建 collection，第 1 片成功后 2~71 片全部因 409 `Collection already exists` 失败，导致 `成功: 0, 失败: 71`，文档卡在 FAILED。
+
+**根因**：Chroma v2 API（1.0.x）对同名 collection 严格返回 409；旧实现只 POST、不 GET 复用。
+
+**修复证据**：E2E 跑 cloud.pdf（71 切片）→ `成功: 71, 失败: 0`，Chroma count 端点确认 71 条向量；后端日志 0 个 409。
+
+详细代码：`src/main/java/com/ragqa/service/ChromaService.java`（getOrCreateCollectionId、getFromChroma、invalidateCollectionIdCache）。
+
+---
+
+**设计文档状态：已审批（含 2026-06-27 增量更新）**
+
+---
+
+**设计文档状态：已审批（含 2026-06-27 增量更新）**
+
 <!-- Design Review: PASS - 2026-03-15 -->
+<!-- Design Review: PASS (增量) - 2026-06-27 -->
+
+---
+
+## 10. 前端文档状态实时同步（2026-06-27 增量）
+
+### 10.1 问题
+
+用户上传文档后，前端 UI 卡在"上传中 10%"不更新，状态变更需等下一次 2 秒轮询才能看到。
+
+**根因**（已确诊）：
+1. `alert()` 阻塞主线程 — 用户点 OK 前 JS 完全冻结
+2. 缺乐观插入 — 后端上传响应里返回的 `Document(status=UPLOADING, progress=10)` 被丢弃
+3. 轮询固定 2s — 即便状态已变更，也要等下一次轮询
+4. 轮询停止条件激进 — 一旦没有"处理中"就停，可能漏掉刚上传的文档
+5. 无错误重试 — 轮询失败静默
+6. **缺 SSE 实时推送** — 最根本的延迟来源
+
+### 10.2 架构
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  前端 ChatView.vue                                       │
+│                                                            │
+│  useDocumentStream(kbId)                                  │
+│    ├─ Primary:  EventSource('/api/.../stream?token=...') │
+│    │             ↓ 断线                                    │
+│    │           reconnect (exp backoff 1s/2s/4s/.../30s)   │
+│    │             ↓ 重连 6 次失败                           │
+│    └─ Fallback: setInterval(3000ms) 轮询                 │
+│                                                            │
+│  useToast()  ← 全局 toast 队列                            │
+└────────────────┬─────────────────────────────────────────┘
+                 │ HTTP GET /api/knowledge-bases/{kbId}/documents/stream?token=xxx
+                 ▼
+┌──────────────────────────────────────────────────────────┐
+│  后端 DocumentController                                  │
+│    @GetMapping("/.../stream")                             │
+│    public Flux<ServerSentEvent<String>> streamDocStatus() │
+│      ├─ 鉴权检查（header 优先 / query token 备选）        │
+│      ├─ subscribe to Sinks.Many<DocumentStatusEvent>     │
+│      └─ map to ServerSentEvent.event("doc-status")       │
+└────────────────┬─────────────────────────────────────────┘
+                 │
+                 ▼
+┌──────────────────────────────────────────────────────────┐
+│  DocumentStatusEventService (新)                          │
+│    ConcurrentMap<UUID, Sinks.Many<DocumentStatusEvent>>  │
+│      ├─ emit(kbId, event)    →  tryEmitNext()            │
+│      ├─ getOrCreateSink(kbId) →  multicast + buffer(100) │
+│      └─ removeSink(kbId)      →  tryEmitComplete         │
+│                                                            │
+│  DocumentProcessService (改)                              │
+│    @Async "documentProcessExecutor"                       │
+│    public void processDocumentAsync(...)                  │
+│      └─ saveAndEmit(doc)  // 5 个状态变更点                │
+└──────────────────────────────────────────────────────────┘
+```
+
+### 10.3 选型理由
+
+| 候选方案 | 优劣 | 决策 |
+|---------|------|------|
+| `Sinks.Many.multicast()` ✅ | 线程安全、backpressure、buffer replay、天然适配 Flux SSE 端点、与现有 `ChatController.streamChat` 风格一致 | **采用** |
+| `ApplicationEventPublisher` ❌ | 简单但每订阅者需要 @EventListener 样板代码，无法直接转 SSE 流 | 拒绝 |
+| `SseEmitter` 手动管理 ❌ | 需自己维护 `Map<UUID, List<SseEmitter>>`，多线程同步复杂 | 拒绝 |
+| 纯轮询（之前）❌ | 简单但延迟 ≥2s，无法实时 | 拒绝 |
+| WebSocket ❌ | 双向通信，当前需求单向推送 | 过度设计 |
+
+### 10.4 安全权衡 — EventSource + JWT
+
+**问题**：浏览器 `EventSource` API 不支持自定义 header（W3C 规范），但项目用 JWT + localStorage。
+
+**方案对比**：
+- ❌ HttpOnly cookie：需前后端双重改造，超出本次范围
+- ✅ **Query param `?token=xxx`**：单端点改造，浏览器原生 SSE 自动重连保留 query
+- ❌ fetch + ReadableStream：失去浏览器原生重连
+
+**风险**：
+1. Token 出现在 URL → 可能被代理/浏览器历史/服务端访问日志记录
+2. SSE 长连接 → 增加 token 暴露窗口
+
+**缓解措施**（已实施）：
+1. Token 在 query 中通过 `encodeURIComponent` 编码
+2. 后端 controller 在每次请求时验证 token 签名（`jwtService.extractUsername`）
+3. 前端 EventSource 自动重连时附带当前 localStorage 中的最新 token
+
+**未来优化**（SDD 跟踪）：
+- 生产部署建议改 HttpOnly Cookie + CSRF Token
+- 短期 token（5 分钟）+ 长期 refresh token 双层架构
+- nginx `proxy_read_timeout 300s` 配置避免 SSE 被切断
+
+### 10.5 降级策略
+
+```
+SSE 连接成功 → 监听 'doc-status' 事件
+     ↓ 断线（onerror）
+scheduleReconnect()
+     ↓
+reconnectAttempt < 6 ?
+     ├─ Yes → setTimeout(RECONNECT_DELAYS[attempt]) → 重试 SSE
+     │          RECONNECT_DELAYS = [1s, 2s, 4s, 8s, 15s, 30s]
+     └─ No  → startFallback() → 启用 3s 轮询
+                  ↓
+              轮询成功 → 继续轮询（不再尝试 SSE，避免反复失败）
+```
+
+**关键点**：
+- fallback 轮询与 SSE 不互斥：SSE 启动失败时 fallback 已经先跑（覆盖 SSE 启动延迟）
+- SSE 成功后会主动停止 fallback（`es.onopen` 钩子）
+- 切换 KB 时先 `stop()` 旧的，再 `start()` 新的（防止订阅错乱）
+
+### 10.6 状态机
+
+```
+UPLOADING(10%)  ──上传成功──>  PARSING(30%)  ──Tika 解析──>  CHUNKING(50%)
+                                                              ↓
+EMBEDDING(70%)  ──循环每个 chunk +30/(N)──>  COMPLETED(100%)
+     │
+     └── 异常 ──> FAILED + errorMessage
+```
+
+**事件 payload 字段**：
+```json
+{
+  "documentId": "uuid",
+  "knowledgeBaseId": "uuid",
+  "status": "PARSING|CHUNKING|EMBEDDING|COMPLETED|FAILED|...",
+  "progress": 30,
+  "errorMessage": null,
+  "updatedAt": "2026-06-27T15:00:00"
+}
+```
+
+**前端合并策略**：
+```js
+mergeEvent(event) {
+  const idx = documents.value.findIndex(d => d.id === event.documentId)
+  if (idx >= 0) {
+    // 覆盖更新 — 保留 fileName 等其他字段
+    documents.value[idx] = { ...documents.value[idx], ...event }
+  } else {
+    // 文档不在列表中 → 追加（边界场景：刚切 KB）
+    documents.value.push({ id: event.documentId, ...event })
+  }
+}
+```
+
+### 10.7 Toast 系统
+
+替换所有 `alert()` 为非阻塞 toast：
+
+```js
+const toast = useToast()
+toast.success('文档上传成功，正在处理...')    // 绿色 3s
+toast.error('上传失败: ' + errorMsg, 5000)   // 红色 5s
+toast.info('正在切换知识库...')                // 蓝色 3s
+toast.warning('SSE 断开，已切换到轮询模式')   // 黄色 4s
+```
+
+特性：
+- 模块级单例 — 全应用共享同一队列
+- 自动消失 + 可点击手动 dismiss
+- `<TransitionGroup>` 平滑动画
+- 不阻塞主线程（替代 alert）
+
+### 10.8 修改文件清单（FIX-011 ~ FIX-016）
+
+| FIX | 文件 | 内容 |
+|-----|------|------|
+| FIX-011 | `event/DocumentStatusEvent.java` | 新建 record |
+| FIX-011 | `event/DocumentStatusEventService.java` | 新建 Sinks 事件总线 |
+| FIX-012 | `controller/DocumentController.java` | 新增 SSE 端点 + 鉴权 |
+| FIX-013 | `service/DocumentProcessService.java` | 注入事件服务，5 个 emit 点 |
+| FIX-013 | `config/GlobalExceptionHandler.java` | 处理 SecurityException → 401 |
+| FIX-014 | `composables/useDocumentStream.js` | 新建 SSE+fallback composable |
+| FIX-014 | `views/ChatView.vue` | 重构：删轮询、删 alert、加乐观插入 |
+| FIX-015 | 同上 | 轮询 fallback 自动接管 |
+| FIX-016 | `composables/useToast.js` | 新建 |
+| FIX-016 | `components/common/ToastContainer.vue` | 新建 |
+| FIX-016 | `main.js` + `App.vue` | 注册 ToastContainer |
+
+### 10.9 验证方式
+
+**后端单元测试**（已通过 10/10）：
+```bash
+JWT_SECRET=$(openssl rand -base64 32) mvn test \
+  -Dtest='DocumentStatusEventServiceTest,DocumentControllerStreamTest'
+```
+
+**前端 E2E**（手动）：
+```bash
+./start.sh
+# 浏览器访问 http://localhost:5173
+# 上传 PDF → 观察：
+#   1. Toast 立即显示"上传成功"（非 alert）
+#   2. 文档列表立刻显示新条目（乐观插入）
+#   3. progress 实时跳动：10 → 30 → 50 → 70 → ... → 100
+#   4. 状态文字实时变化：上传中 → 解析中 → 切分中 → 向量化中 → 已完成
+# 关闭后端 → 前端 fallback 自动切到轮询，warn toast 提示
+# 重启后端 → SSE 自动重连
+```
+
+**测试用例文档**：`docs/test-cases/feature-31-doc-status-sse.md`
+
+---
+
+**设计文档状态：已审批（含 2026-06-27 增量更新）**
+
+<!-- Design Review: PASS - 2026-03-15 -->
+<!-- Design Review: PASS (增量) - 2026-06-27 -->
+<!-- Design Review: PASS (SSE 增量) - 2026-06-27 -->
