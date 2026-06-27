@@ -173,13 +173,16 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import axios from 'axios'
 import { marked } from 'marked'
 import { useRouter } from 'vue-router'
+import { useToast } from '../composables/useToast.js'
+import { useDocumentStream } from '../composables/useDocumentStream.js'
 
 const router = useRouter()
 const username = ref(localStorage.getItem('username') || '')
+const toast = useToast()
 
 const logout = () => {
   localStorage.removeItem('token')
@@ -203,7 +206,12 @@ const uploading = ref(false)
 const sessions = ref([])
 const currentSession = ref(null)
 
-const API_BASE = 'http://localhost:8080/api'
+// 【2026-06-27 增量】使用 Vite proxy（同源），不再硬编码 localhost:8080
+// axios 已通过 main.js 设置 baseURL='',Vite proxy 把 /api 转发到后端
+const API_BASE = '/api'
+
+// 【2026-06-27 增量】使用 SSE 实时推送 + 降级轮询的 composable
+const docStream = useDocumentStream(currentKb, documents)
 
 const loadKnowledgeBases = async () => {
   try {
@@ -214,41 +222,34 @@ const loadKnowledgeBases = async () => {
     }
   } catch (e) {
     console.error('加载知识库失败:', e)
+    toast.error('加载知识库失败：' + (e.response?.data?.error || e.message))
   }
 }
 
 const selectKnowledgeBase = (kb) => {
+  // 切换 KB 时重置文档列表（避免显示旧 KB 的文档）
+  documents.value = []
   currentKb.value = kb
   messages.value = []
+  currentSession.value = null
+
+  // 【2026-06-27 增量】启动 SSE 订阅（同时 fallback 轮询）
+  docStream.stop()   // 先停旧的（如果存在）
+  docStream.start()
+
+  // 【2026-06-27 增量】主动拉取该 KB 的全量文档列表。
+  // 仅靠 SSE 增量只能收到「正在处理的文档」事件，已存在/已完成的文档不会触发推送，
+  // 必须主动 GET 一次才能把文档列表展示给用户。
   loadDocuments(kb.id)
-  startDocPolling(kb.id)
-}
-
-let docPollInterval = null
-
-const startDocPolling = (kbId) => {
-  if (docPollInterval) clearInterval(docPollInterval)
-  docPollInterval = setInterval(() => {
-    loadDocuments(kbId)
-  }, 2000)
-}
-
-const isStillProcessing = (status) => {
-  return status === 'UPLOADING' || status === 'PARSING' || status === 'CHUNKING' || status === 'EMBEDDING'
 }
 
 const loadDocuments = async (kbId) => {
   try {
     const res = await axios.get(`${API_BASE}/knowledge-bases/${kbId}/documents`)
-    documents.value = res.data
-    
-    const hasProcessing = documents.value.some(d => isStillProcessing(d.status))
-    if (!hasProcessing && docPollInterval) {
-      clearInterval(docPollInterval)
-      docPollInterval = null
-    }
+    documents.value = Array.isArray(res.data) ? res.data : []
   } catch (e) {
     console.error('加载文档失败:', e)
+    documents.value = []
   }
 }
 
@@ -314,8 +315,9 @@ const createKnowledgeBase = async () => {
     selectKnowledgeBase(res.data)
     showCreateModal.value = false
     newKbName.value = ''
+    toast.success('知识库创建成功')
   } catch (e) {
-    alert('创建失败: ' + e.message)
+    toast.error('创建失败: ' + (e.response?.data?.error || e.message))
   }
 }
 
@@ -328,26 +330,36 @@ const handleFileSelect = (event) => {
 
 const uploadDocument = async () => {
   if (!uploadFile.value || !uploadKbId.value) return
-  
+
   uploading.value = true
   const formData = new FormData()
   formData.append('file', uploadFile.value)
-  
+
   try {
-    await axios.post(`${API_BASE}/knowledge-bases/${uploadKbId.value}/documents`, formData, {
+    // 【2026-06-27 增量】使用 SSE 时，不再依赖轮询拉取，文档状态由 EventSource 推送
+    const res = await axios.post(`${API_BASE}/knowledge-bases/${uploadKbId.value}/documents`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
     })
-    alert('文档上传成功！')
+
+    // 【乐观插入】后端返回的 Document 立刻 push 到 documents 列表
+    // 这样用户关掉模态框后立刻看到新条目（无需等待 SSE 推送）
+    if (res.data && res.data.id) {
+      const exists = documents.value.some(d => d.id === res.data.id)
+      if (!exists) {
+        documents.value = [...documents.value, res.data]
+      }
+    }
+
     showUploadModal.value = false
     uploadFile.value = null
-    loadDocuments(uploadKbId.value)
+    toast.success('文档上传成功，正在处理...')
     uploadKbId.value = null
   } catch (e) {
     const errorMsg = e.response?.data?.error || e.message || '上传失败'
-    alert('上传失败: ' + errorMsg)
+    toast.error('上传失败: ' + errorMsg, 5000)
+  } finally {
+    uploading.value = false
   }
-  
-  uploading.value = false
 }
 
 const sendMessage = async () => {
@@ -367,11 +379,20 @@ const sendMessage = async () => {
       knowledgeBaseId: currentKb.value.id,
       history: messages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
     })
-    messages.value.push({ role: 'assistant', content: res.data })
+    // 【2026-06-27 增量】后端返回 { sessionId, answer }，并已把本次问答落库到 chat_history
+    const sessionId = res.data?.sessionId
+    const answer = res.data?.answer ?? (typeof res.data === 'string' ? res.data : '')
+    messages.value.push({ role: 'assistant', content: answer })
+    if (sessionId) {
+      currentSession.value = sessionId
+      await loadSessions()   // 刷新侧边栏「聊天历史」
+    }
   } catch (e) {
-    messages.value.push({ role: 'assistant', content: '抱歉，请求失败: ' + e.message })
+    const errorMsg = e.response?.data?.error || e.message
+    messages.value.push({ role: 'assistant', content: '抱歉，请求失败: ' + errorMsg })
+    toast.error('发送失败: ' + errorMsg)
   }
-  
+
   loading.value = false
   await nextTick()
   scrollToBottom()
@@ -395,6 +416,11 @@ const renderMarkdown = (content) => {
 onMounted(() => {
   loadKnowledgeBases()
   loadSessions()
+})
+
+// 【2026-06-27 增量】组件卸载时关闭 SSE 连接，防止内存泄漏
+onUnmounted(() => {
+  docStream.stop()
 })
 </script>
 

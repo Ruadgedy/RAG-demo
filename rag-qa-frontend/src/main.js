@@ -5,8 +5,12 @@ import App from './App.vue'
 import ChatView from './views/ChatView.vue'
 import KnowledgeView from './views/KnowledgeView.vue'
 import LoginView from './views/LoginView.vue'
+import ToastContainer from './components/common/ToastContainer.vue'
 import axios from 'axios'
 import './styles/tokens.css'
+
+// Vite 支持 @ 别名指向 src 根（vite.config.js 已配置 server.proxy，无需 baseURL）
+axios.defaults.baseURL = ''
 
 const routes = [
   { path: '/', component: ChatView },
@@ -52,6 +56,9 @@ axios.interceptors.response.use(
 
 const pinia = createPinia()
 const app = createApp(App)
+
+// 全局注册 Toast 组件
+app.component('ToastContainer', ToastContainer)
 
 app.use(pinia)
 app.use(router)
