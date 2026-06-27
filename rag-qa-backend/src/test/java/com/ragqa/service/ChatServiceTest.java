@@ -1,6 +1,8 @@
 package com.ragqa.service;
 
 import com.ragqa.dto.ChatRequest;
+import com.ragqa.dto.ChatResponse;
+import com.ragqa.repository.ChatHistoryRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -31,11 +33,14 @@ class ChatServiceTest {
     @Mock
     private ChatClient.Builder chatClientBuilder;
 
+    @Mock
+    private ChatHistoryRepository chatHistoryRepository;
+
     private ChatService chatService;
 
     @BeforeEach
     void setUp() {
-        chatService = new ChatService(ragService, chatClientBuilder);
+        chatService = new ChatService(ragService, chatClientBuilder, chatHistoryRepository);
     }
 
     @Test
@@ -47,9 +52,12 @@ class ChatServiceTest {
 
         when(ragService.chat("测试问题", kbId)).thenReturn("这是测试回答");
 
-        String result = chatService.chat(request);
+        ChatResponse result = chatService.chat(request);
 
-        assertThat(result).isEqualTo("这是测试回答");
+        assertThat(result.getAnswer()).isEqualTo("这是测试回答");
+        assertThat(result.getSessionId()).isNotNull();
+        // user 问题与 assistant 回答两条记录都应被持久化
+        verify(chatHistoryRepository, times(2)).save(any());
         verify(ragService).chat("测试问题", kbId);
     }
 
@@ -62,8 +70,8 @@ class ChatServiceTest {
 
         when(ragService.chat("测试问题", kbId)).thenReturn("该知识库暂无文档，请先上传文档。");
 
-        String result = chatService.chat(request);
+        ChatResponse result = chatService.chat(request);
 
-        assertThat(result).contains("暂无文档");
+        assertThat(result.getAnswer()).contains("暂无文档");
     }
 }

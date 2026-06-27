@@ -6,6 +6,8 @@ import com.ragqa.config.SecurityConfig;
 import com.ragqa.dto.CreateKnowledgeBaseRequest;
 import com.ragqa.dto.KnowledgeBaseResponse;
 import com.ragqa.model.KnowledgeBase;
+import com.ragqa.repository.UserRepository;
+import com.ragqa.service.JwtService;
 import com.ragqa.service.KnowledgeBaseService;
 import com.ragqa.service.UserService;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,6 +27,7 @@ import java.util.UUID;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -43,6 +46,20 @@ class KnowledgeBaseControllerTest {
 
     @MockBean
     private UserService userService;
+
+    /**
+     * JwtAuthenticationFilter 在 SecurityFilterChain 中需要 JwtService Bean。
+     * @WebMvcTest 切片不加载 @Service Bean，因此需要显式 Mock。
+     */
+    @MockBean
+    private JwtService jwtService;
+
+    /**
+     * SecurityConfig.userDetailsService() 依赖 UserRepository。
+     * @WebMvcTest 不加载 JPA Repositories，需 Mock。
+     */
+    @MockBean
+    private UserRepository userRepository;
 
     @Autowired
     private ObjectMapper objectMapper;
@@ -68,12 +85,17 @@ class KnowledgeBaseControllerTest {
         createRequest.setDescription("新知识库描述");
     }
 
+    private UsernamePasswordAuthenticationToken testUser() {
+        return new UsernamePasswordAuthenticationToken("testuser", null, List.of());
+    }
+
     @Test
     void shouldCreateKnowledgeBase() throws Exception {
         when(knowledgeBaseService.create(any(CreateKnowledgeBaseRequest.class)))
                 .thenReturn(testKnowledgeBase);
 
         mockMvc.perform(post("/api/knowledge-bases")
+                        .with(authentication(testUser()))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(createRequest)))
                 .andExpect(status().isCreated())
@@ -84,7 +106,7 @@ class KnowledgeBaseControllerTest {
     void shouldListKnowledgeBases() throws Exception {
         when(knowledgeBaseService.findAll()).thenReturn(List.of(testKnowledgeBase));
 
-        mockMvc.perform(get("/api/knowledge-bases"))
+        mockMvc.perform(get("/api/knowledge-bases").with(authentication(testUser())))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].name").value("测试知识库"));
     }
@@ -94,7 +116,7 @@ class KnowledgeBaseControllerTest {
         UUID kbId = testKnowledgeBase.getId();
         when(knowledgeBaseService.findById(kbId)).thenReturn(testKnowledgeBase);
 
-        mockMvc.perform(get("/api/knowledge-bases/" + kbId))
+        mockMvc.perform(get("/api/knowledge-bases/" + kbId).with(authentication(testUser())))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.name").value("测试知识库"));
     }
@@ -103,7 +125,7 @@ class KnowledgeBaseControllerTest {
     void shouldDeleteKnowledgeBase() throws Exception {
         UUID kbId = testKnowledgeBase.getId();
 
-        mockMvc.perform(delete("/api/knowledge-bases/" + kbId))
+        mockMvc.perform(delete("/api/knowledge-bases/" + kbId).with(authentication(testUser())))
                 .andExpect(status().isNoContent());
     }
 }

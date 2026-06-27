@@ -3,7 +3,10 @@ package com.ragqa.controller;
 import com.ragqa.config.JwtAuthenticationFilter;
 import com.ragqa.config.SecurityConfig;
 import com.ragqa.dto.ChatRequest;
+import com.ragqa.dto.ChatResponse;
+import com.ragqa.repository.UserRepository;
 import com.ragqa.service.ChatService;
+import com.ragqa.service.JwtService;
 import com.ragqa.service.UserService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,6 +24,7 @@ import java.util.UUID;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -40,12 +44,28 @@ class ChatControllerTest {
     @MockBean
     private UserService userService;
 
+    /**
+     * JwtAuthenticationFilter 在 SecurityFilterChain 中需要 JwtService Bean。
+     * @WebMvcTest 切片不加载 @Service Bean，因此需要显式 Mock。
+     */
+    @MockBean
+    private JwtService jwtService;
+
+    /**
+     * SecurityConfig.userDetailsService() 依赖 UserRepository。
+     * @WebMvcTest 不加载 JPA Repositories，需 Mock。
+     */
+    @MockBean
+    private UserRepository userRepository;
+
     @Autowired
     private com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
     @BeforeEach
     void setUp() {
-        // 模拟已认证用户
+        // 模拟已认证用户。Spring Security 6 的 SecurityContextHolderFilter
+        // 不再从 ThreadLocal 读取 SecurityContext，必须通过 .with(authentication(...))
+        // 显式传给 MockMvc 请求。
         UsernamePasswordAuthenticationToken auth =
                 new UsernamePasswordAuthenticationToken("testuser", null, List.of());
         SecurityContextHolder.getContext().setAuthentication(auth);
@@ -57,13 +77,17 @@ class ChatControllerTest {
         request.setMessage("什么是 RAG？");
         request.setKnowledgeBaseId(UUID.randomUUID());
 
-        when(chatService.chat(any(ChatRequest.class))).thenReturn("RAG 是检索增强生成...");
+        when(chatService.chat(any(ChatRequest.class)))
+                .thenReturn(new ChatResponse("session-123", "RAG 是检索增强生成..."));
 
         mockMvc.perform(post("/api/chat")
+                        .with(authentication(new UsernamePasswordAuthenticationToken(
+                                "testuser", null, List.of())))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isOk())
-                .andExpect(content().string("RAG 是检索增强生成..."));
+                .andExpect(jsonPath("$.sessionId").value("session-123"))
+                .andExpect(jsonPath("$.answer").value("RAG 是检索增强生成..."));
     }
 
     @Test
@@ -73,6 +97,8 @@ class ChatControllerTest {
         request.setKnowledgeBaseId(UUID.randomUUID());
 
         mockMvc.perform(post("/api/chat")
+                        .with(authentication(new UsernamePasswordAuthenticationToken(
+                                "testuser", null, List.of())))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isBadRequest());
@@ -85,6 +111,8 @@ class ChatControllerTest {
         // knowledgeBaseId 缺失
 
         mockMvc.perform(post("/api/chat")
+                        .with(authentication(new UsernamePasswordAuthenticationToken(
+                                "testuser", null, List.of())))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isBadRequest());

@@ -1,5 +1,7 @@
 package com.ragqa.dto;
 
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import lombok.Data;
 import java.util.List;
 import java.util.UUID;
@@ -17,9 +19,11 @@ import java.util.UUID;
 @Data
 public class ChatRequest {
     /** 用户问题 */
+    @NotBlank(message = "问题不能为空")
     private String message;
 
     /** 知识库ID */
+    @NotNull(message = "知识库ID不能为空")
     private UUID knowledgeBaseId;
 
     /** 对话历史（可选，用于多轮对话上下文） */

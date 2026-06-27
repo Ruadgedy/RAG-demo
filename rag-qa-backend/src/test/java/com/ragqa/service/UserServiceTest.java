@@ -11,6 +11,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 import java.util.Optional;
@@ -30,11 +34,19 @@ class UserServiceTest {
     @Mock
     private PasswordEncoder passwordEncoder;
 
+    @Mock
+    private JwtService jwtService;
+
+    @Mock
+    private AuthenticationManager authenticationManager;
+
     @InjectMocks
     private UserService userService;
 
     private RegisterRequest registerRequest;
     private LoginRequest loginRequest;
+
+    private static final String TEST_TOKEN = "test.jwt.token";
 
     @BeforeEach
     void setUp() {
@@ -50,9 +62,10 @@ class UserServiceTest {
 
     @Test
     void shouldRegisterNewUser() {
-        when(userRepository.findByUsername("testuser")).thenReturn(Optional.empty());
+        // existsByUsername 是生产代码注册路径调用的方法，stub 为 false
+        when(userRepository.existsByUsername("testuser")).thenReturn(false);
         when(passwordEncoder.encode("password123")).thenReturn("encoded_password");
-        
+
         User savedUser = new User();
         savedUser.setId(UUID.randomUUID());
         savedUser.setUsername("testuser");
@@ -60,20 +73,24 @@ class UserServiceTest {
         savedUser.setEmail("test@example.com");
         when(userRepository.save(any(User.class))).thenReturn(savedUser);
 
+        // register 路径在 save 后会调用 loadUserByUsername + jwtService.generateToken
+        when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(savedUser));
+        when(jwtService.generateToken(any(UserDetails.class))).thenReturn(TEST_TOKEN);
+
         AuthResponse response = userService.register(registerRequest);
 
         assertThat(response).isNotNull();
         assertThat(response.getUsername()).isEqualTo("testuser");
-        assertThat(response.getToken()).isNotNull();
+        assertThat(response.getToken()).isEqualTo(TEST_TOKEN);
         verify(userRepository).save(any(User.class));
     }
 
     @Test
     void shouldThrowExceptionWhenUsernameExists() {
-        when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(new User()));
+        when(userRepository.existsByUsername("testuser")).thenReturn(true);
 
         assertThatThrownBy(() -> userService.register(registerRequest))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(RuntimeException.class)
                 .hasMessageContaining("用户名已存在");
 
         verify(userRepository, never()).save(any());
@@ -85,41 +102,41 @@ class UserServiceTest {
         user.setId(UUID.randomUUID());
         user.setUsername("testuser");
         user.setPassword("encoded_password");
-        
+
+        // login 路径首先调用 authenticationManager.authenticate
+        when(authenticationManager.authenticate(any(UsernamePasswordAuthenticationToken.class)))
+                .thenReturn(new UsernamePasswordAuthenticationToken("testuser", null, java.util.List.of()));
         when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(user));
-        when(passwordEncoder.matches("password123", "encoded_password")).thenReturn(true);
+        when(jwtService.generateToken(any(UserDetails.class))).thenReturn(TEST_TOKEN);
 
         AuthResponse response = userService.login(loginRequest);
 
         assertThat(response).isNotNull();
         assertThat(response.getUsername()).isEqualTo("testuser");
-        assertThat(response.getToken()).isNotNull();
+        assertThat(response.getToken()).isEqualTo(TEST_TOKEN);
+        verify(authenticationManager).authenticate(any(UsernamePasswordAuthenticationToken.class));
     }
 
     @Test
     void shouldThrowExceptionWithInvalidPassword() {
-        User user = new User();
-        user.setUsername("testuser");
-        user.setPassword("encoded_password");
-        
-        when(userRepository.findByUsername("testuser")).thenReturn(Optional.of(user));
-        when(passwordEncoder.matches("password123", "encoded_password")).thenReturn(false);
+        // login 路径首先经过 authenticationManager，模拟密码错误时它抛出 BadCredentialsException
+        when(authenticationManager.authenticate(any(UsernamePasswordAuthenticationToken.class)))
+                .thenThrow(new BadCredentialsException("密码错误"));
 
         assertThatThrownBy(() -> userService.login(loginRequest))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("密码错误");
+                .isInstanceOf(BadCredentialsException.class);
     }
 
     @Test
     void shouldThrowExceptionWhenUserNotFound() {
-        when(userRepository.findByUsername("nonexistent")).thenReturn(Optional.empty());
+        when(authenticationManager.authenticate(any(UsernamePasswordAuthenticationToken.class)))
+                .thenThrow(new BadCredentialsException("用户不存在"));
 
         LoginRequest invalidRequest = new LoginRequest();
         invalidRequest.setUsername("nonexistent");
         invalidRequest.setPassword("password");
 
         assertThatThrownBy(() -> userService.login(invalidRequest))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("用户不存在");
+                .isInstanceOf(BadCredentialsException.class);
     }
 }

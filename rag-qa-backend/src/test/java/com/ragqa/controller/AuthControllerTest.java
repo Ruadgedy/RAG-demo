@@ -1,15 +1,20 @@
 package com.ragqa.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ragqa.config.JwtAuthenticationFilter;
+import com.ragqa.config.SecurityConfig;
 import com.ragqa.dto.AuthResponse;
 import com.ragqa.dto.LoginRequest;
 import com.ragqa.dto.RegisterRequest;
+import com.ragqa.repository.UserRepository;
+import com.ragqa.service.JwtService;
 import com.ragqa.service.UserService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -25,6 +30,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 依赖项使用 @MockBean 模拟
  */
 @WebMvcTest(AuthController.class)
+@Import({SecurityConfig.class, JwtAuthenticationFilter.class})
 class AuthControllerTest {
 
     @Autowired
@@ -32,6 +38,17 @@ class AuthControllerTest {
 
     @MockBean
     private UserService userService;
+
+    /**
+     * JwtAuthenticationFilter 作为 @Component 会被 @WebMvcTest 加载。
+     * 其构造函数依赖 JwtService、UserDetailsService(→UserRepository)。
+     * @WebMvcTest 不加载 @Service Bean，因此需要全部 Mock。
+     */
+    @MockBean
+    private JwtService jwtService;
+
+    @MockBean
+    private UserRepository userRepository;
 
     @Autowired
     private ObjectMapper objectMapper;
