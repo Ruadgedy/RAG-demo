@@ -40,6 +40,7 @@ public class DocumentService {
     private final DocumentChunkRepository documentChunkRepository;
     private final DocumentProcessService documentProcessService;
     private final ChromaService chromaService;
+    private final Bm25SearchService bm25Service;
 
     /** 文件上传目录 */
     @Value("${file.upload-dir:./uploads}")
@@ -47,14 +48,19 @@ public class DocumentService {
 
     /**
      * 上传文档
-     * 
+     *
      * 流程：
      * 1. 验证知识库存在
      * 2. 验证文件类型
-     * 3. 保存文件到本地
-     * 4. 创建Document记录（状态为UPLOADING）
-     * 5. 异步触发文档处理（解析、切片、向量化）
-     * 
+     * 3. 安全解析文件名（防止路径遍历攻击）
+     * 4. 保存文件到本地
+     * 5. 创建Document记录（状态为UPLOADING）
+     * 6. 异步触发文档处理（解析、切片、向量化）
+     *
+     * 【安全加固 2026-06-27】原本直接用 file.getOriginalFilename() 拼接路径，
+     * 攻击者可上传 ../../etc/passwd 等文件名逃出 uploads 目录。
+     * 现改为：getFileName() 取最后一段 + normalize() + 边界校验。
+     *
      * @param knowledgeBaseId 知识库ID
      * @param file 上传的文件
      * @return 创建的文档对象
@@ -82,13 +88,25 @@ public class DocumentService {
         }
 
         // 创建上传目录
-        Path uploadPath = Paths.get(uploadDir, knowledgeBaseId.toString());
+        Path uploadRoot = Paths.get(uploadDir).toAbsolutePath().normalize();
+        Path uploadPath = uploadRoot.resolve(knowledgeBaseId.toString()).normalize();
+
+        // 【路径遍历防护】
+        // 第一层防御：文件名不能包含任何路径分隔符（/ 或 \）
+        // 这是必要的，因为 getFileName() 会把 "../../etc/passwd" 截成 "passwd"，
+        // 单独的 normalize + startsWith 检查无法发现攻击。
+        if (fileName != null && (fileName.contains("/") || fileName.contains("\\"))) {
+            throw new IllegalArgumentException("非法文件名: " + fileName);
+        }
+
+        // 第二层防御：getFileName + normalize + 边界校验（防御 NUL 字节、特殊 Unicode 等）
+        Path filePath = uploadPath.resolve(Paths.get(fileName).getFileName()).normalize();
+        if (!filePath.startsWith(uploadRoot)) {
+            throw new IllegalArgumentException("非法文件名: " + fileName);
+        }
+
         Files.createDirectories(uploadPath);
 
-        // fix：直接复用原始的上传文件名
-        String storedFileName =  fileName;
-        Path filePath = uploadPath.resolve(storedFileName);
-        
         try {
             Files.copy(file.getInputStream(), filePath);
         } catch (IOException e) {
@@ -113,7 +131,7 @@ public class DocumentService {
 
         // saveAndFlush 确保数据立即写入数据库，让异步线程能读到
         document = documentRepository.saveAndFlush(document);
-        
+
         // 异步触发后续处理（解析、切片、向量化）
         // 注意：这里调用的是另一个Service的@Async方法
         documentProcessService.processDocumentAsync(document.getId(), filePath);
@@ -138,30 +156,40 @@ public class DocumentService {
 
     /**
      * 删除文档
-     * 
+     *
      * 会同时删除：
-     * - Chroma向量数据库中的向量
-     * - MySQL中的切片记录
+     * - Chroma 向量数据库中的向量
+     * - BM25 内存索引（避免索引膨胀 + IDF 统计被污染）
+     * - MySQL 中的切片记录
      * - 本地文件
      * - 文档记录
+     *
+     * 【修复日期 2026-06-27】补充了 BM25 索引清理。
      */
     @Transactional
     public void deleteDocument(UUID id) {
         Document doc = getDocument(id);
-        
+
         // 删除Chroma向量（关键：否则向量数据库会有孤立的向量）
         chromaService.deleteByDocumentId(id);
-        
+
+        // 删除 BM25 内存索引（关键：否则索引会膨胀，且 IDF 统计被已删除的 chunk 污染）
+        try {
+            bm25Service.removeByDocumentId(id.toString());
+        } catch (Exception e) {
+            log.warn("清理 BM25 索引失败: documentId={}, err={}", id, e.getMessage());
+        }
+
         // 删除MySQL切片记录
         documentChunkRepository.deleteByDocumentId(id);
-        
+
         // 删除本地文件
         try {
             Files.deleteIfExists(Paths.get(doc.getFilePath()));
         } catch (IOException e) {
             log.warn("删除文件失败: {}", doc.getFilePath());
         }
-        
+
         // 删除文档记录
         documentRepository.delete(doc);
     }
