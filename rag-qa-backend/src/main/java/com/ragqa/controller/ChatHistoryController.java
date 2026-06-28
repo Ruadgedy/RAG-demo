@@ -1,6 +1,7 @@
 package com.ragqa.controller;
 
 import com.ragqa.model.ChatHistory;
+import com.ragqa.model.User;
 import com.ragqa.repository.ChatHistoryRepository;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -11,6 +12,8 @@ import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -44,6 +47,10 @@ public class ChatHistoryController {
 
     private final ChatHistoryRepository chatHistoryRepository;
 
+    /**
+     * 获取当前用户的所有聊天会话。
+     * 【2026-06-28 修复】按 userId 过滤，不再返回所有用户的历史。
+     */
     @Operation(summary = "获取所有会话", description = "获取当前用户的所有对话会话")
     @ApiResponses(value = {
             @ApiResponse(responseCode = "200", description = "获取成功"),
@@ -51,10 +58,15 @@ public class ChatHistoryController {
     })
     @GetMapping("/chat-history")
     public ResponseEntity<List<ChatHistory>> getAllSessions() {
-        List<ChatHistory> history = chatHistoryRepository.findAll();
+        String userId = getCurrentUserId();
+        List<ChatHistory> history = chatHistoryRepository.findByUserIdOrderByCreatedAtDesc(userId);
         return ResponseEntity.ok(history);
     }
 
+    /**
+     * 获取指定会话的所有消息。
+     * 【2026-06-28 修复】加入 userId 过滤，防止越权查看他人历史。
+     */
     @Operation(summary = "获取会话消息", description = "获取指定会话的所有消息，按时间正序排列")
     @ApiResponses(value = {
             @ApiResponse(responseCode = "200", description = "获取成功",
@@ -64,7 +76,9 @@ public class ChatHistoryController {
     @GetMapping("/chat-history/{sessionId}")
     public ResponseEntity<List<ChatHistory>> getHistoryBySession(
             @Parameter(description = "会话ID") @PathVariable String sessionId) {
-        List<ChatHistory> history = chatHistoryRepository.findBySessionIdOrderByCreatedAtAsc(sessionId);
+        String userId = getCurrentUserId();
+        List<ChatHistory> history = chatHistoryRepository
+                .findBySessionIdAndUserIdOrderByCreatedAtAsc(sessionId, userId);
         return ResponseEntity.ok(history);
     }
 
@@ -102,5 +116,16 @@ public class ChatHistoryController {
             @Parameter(description = "会话ID") @PathVariable String sessionId) {
         chatHistoryRepository.deleteBySessionId(sessionId);
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * 从 SecurityContext 提取当前用户名作为 userId。
+     */
+    private String getCurrentUserId() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null && auth.getPrincipal() instanceof User user) {
+            return user.getUsername();
+        }
+        return "unknown";
     }
 }

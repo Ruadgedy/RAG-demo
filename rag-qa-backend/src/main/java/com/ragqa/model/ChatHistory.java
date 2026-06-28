@@ -26,7 +26,11 @@ public class ChatHistory {
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
-    
+
+    /** 所属用户ID（username），用于按用户隔离聊天历史 */
+    @Column(name = "user_id")
+    private String userId;
+
     /** 会话ID，用于关联同一轮对话的所有消息 */
     @Column(name = "session_id")
     private String sessionId;

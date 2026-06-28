@@ -114,15 +114,38 @@
         </div>
         
         <div class="input-area" v-if="currentKb">
-          <textarea 
-            v-model="inputMessage" 
-            placeholder="请输入您的问题..."
-            @keydown.enter.exact.prevent="sendMessage"
-            :disabled="loading"
-          ></textarea>
-          <button class="btn-send" @click="sendMessage" :disabled="loading || !inputMessage.trim()">
-            发送
-          </button>
+          <!-- 【2026-06-28 修复】输出模式切换移至输入框上方，更醒目 -->
+          <div class="input-top-bar">
+            <span class="mode-label">输出模式:</span>
+            <button
+              class="mode-btn"
+              :class="{ active: streamMode }"
+              @click="streamMode = true"
+            >
+              ⏩ 流式（SSE）
+            </button>
+            <button
+              class="mode-btn"
+              :class="{ active: !streamMode }"
+              @click="streamMode = false"
+            >
+              ⏸ 一次性
+            </button>
+            <span class="mode-hint">
+              {{ streamMode ? '打字机效果，逐字显示' : '等待完整回答后返回' }}
+            </span>
+          </div>
+          <div class="input-row">
+            <textarea
+              v-model="inputMessage"
+              placeholder="请输入您的问题..."
+              @keydown.enter.exact.prevent="sendMessage"
+              :disabled="loading"
+            ></textarea>
+            <button class="btn-send" @click="sendMessage" :disabled="loading || !inputMessage.trim()">
+              发送
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -205,6 +228,12 @@ const uploadFile = ref(null)
 const uploading = ref(false)
 const sessions = ref([])
 const currentSession = ref(null)
+
+// 【2026-06-28 增量】流式输出开关
+// 默认值取自 Vite 环境变量 VITE_CHAT_STREAM，可通过 .env / .env.local 切换
+// true  → 调用 /api/chat/stream（SSE 打字机效果）
+// false → 调用 /api/chat（等待完整回答后一次性返回）
+const streamMode = ref(import.meta.env.VITE_CHAT_STREAM !== 'false')
 
 // 【2026-06-27 增量】使用 Vite proxy（同源），不再硬编码 localhost:8080
 // axios 已通过 main.js 设置 baseURL='',Vite proxy 把 /api 转发到后端
@@ -364,28 +393,21 @@ const uploadDocument = async () => {
 
 const sendMessage = async () => {
   if (!inputMessage.value.trim() || loading.value || !currentKb.value) return
-  
+
   const userMsg = inputMessage.value
   messages.value.push({ role: 'user', content: userMsg })
   inputMessage.value = ''
   loading.value = true
-  
+
   await nextTick()
   scrollToBottom()
-  
+
   try {
-    const res = await axios.post(`${API_BASE}/chat`, {
-      message: userMsg,
-      knowledgeBaseId: currentKb.value.id,
-      history: messages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
-    })
-    // 【2026-06-27 增量】后端返回 { sessionId, answer }，并已把本次问答落库到 chat_history
-    const sessionId = res.data?.sessionId
-    const answer = res.data?.answer ?? (typeof res.data === 'string' ? res.data : '')
-    messages.value.push({ role: 'assistant', content: answer })
-    if (sessionId) {
-      currentSession.value = sessionId
-      await loadSessions()   // 刷新侧边栏「聊天历史」
+    // 【2026-06-28 增量】根据 streamMode 决定调用流式还是非流式端点
+    if (streamMode.value) {
+      await sendStreamMessage(userMsg)
+    } else {
+      await sendNormalMessage(userMsg)
     }
   } catch (e) {
     const errorMsg = e.response?.data?.error || e.message
@@ -396,6 +418,90 @@ const sendMessage = async () => {
   loading.value = false
   await nextTick()
   scrollToBottom()
+}
+
+/**
+ * 非流式问答：调用 /api/chat，等待完整回答后一次性返回
+ */
+const sendNormalMessage = async (userMsg) => {
+  const res = await axios.post(`${API_BASE}/chat`, {
+    message: userMsg,
+    knowledgeBaseId: currentKb.value.id,
+    history: messages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
+  })
+  // 后端返回 { sessionId, answer }，并已把本次问答落库到 chat_history
+  const sessionId = res.data?.sessionId
+  const answer = res.data?.answer ?? (typeof res.data === 'string' ? res.data : '')
+  messages.value.push({ role: 'assistant', content: answer })
+  if (sessionId) {
+    currentSession.value = sessionId
+    await loadSessions()   // 刷新侧边栏「聊天历史」
+  }
+}
+
+/**
+ * 流式问答：调用 /api/chat/stream，监听 SSE 事件逐字追加到 assistant 消息
+ *
+ * 协议：Spring WebFlux 返回 text/event-stream
+ *   data: <chunk>\n\n
+ *   data: <chunk>\n\n
+ *   ...
+ *
+ * 由于 axios 不原生支持 SSE 解析，这里用 fetch + ReadableStream。
+ */
+const sendStreamMessage = async (userMsg) => {
+  // 1. 先 push 一个空的 assistant 消息占位，逐字填充
+  const assistantIndex = messages.value.length
+  messages.value.push({ role: 'assistant', content: '' })
+  let accumulated = ''
+
+  // 2. fetch 流式响应
+  const response = await fetch(`${API_BASE}/chat/stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+    },
+    body: JSON.stringify({
+      message: userMsg,
+      knowledgeBaseId: currentKb.value.id,
+      history: messages.value.slice(0, -2).map(m => ({ role: m.role, content: m.content }))
+    })
+  })
+
+  if (!response.ok || !response.body) {
+    throw new Error(`HTTP ${response.status}`)
+  }
+
+  // 3. 解析 SSE 流
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    // SSE 事件以 \n\n 分隔，逐个解析
+    const events = buffer.split('\n\n')
+    buffer = events.pop() || ''   // 最后一段可能不完整，保留到下次
+
+    for (const evt of events) {
+      const line = evt.trim()
+      if (!line.startsWith('data:')) continue
+      const chunk = line.slice(5).trim()
+      if (!chunk || chunk === '[DONE]') continue
+      accumulated += chunk
+      // 直接替换 messages[index] 触发响应式更新
+      messages.value[assistantIndex] = { role: 'assistant', content: accumulated }
+      await nextTick()
+      scrollToBottom()
+    }
+  }
+
+  // 4. 刷新侧边栏聊天历史（流式接口也落库了）
+  await loadSessions()
 }
 
 const scrollToBottom = () => {
@@ -439,6 +545,7 @@ body {
   display: flex;
   width: 100vw;
   height: 100vh;
+  overflow: hidden;          /* 【修复 2026-06-28】防止页面级滚动条，所有内容在内部滚动 */
   background: #f5f5f5;
 }
 
@@ -687,6 +794,8 @@ body {
 
 .main {
   flex: 1;
+  min-height: 0;            /* 【修复 2026-06-28】Flex 列子项必须允许收缩至内容以下，
+                               否则超长消息会把整个 .main 撑出视口 */
   display: flex;
   flex-direction: column;
   background: #fff;
@@ -694,6 +803,7 @@ body {
 
 .chat-area {
   flex: 1;
+  min-height: 0;            /* 【修复 2026-06-28】同 .main，保证高度约束传递到 .messages */
   display: flex;
   flex-direction: column;
 }
@@ -704,6 +814,50 @@ body {
                                        否则超长消息会把 .input-area 挤出可视区域 */
   padding: 20px;
   overflow-y: auto;
+}
+
+/* 【2026-06-28 修复】输入区顶部的输出模式切换条 */
+.input-top-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 13px;
+}
+
+.mode-label {
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.mode-btn {
+  padding: 6px 14px;
+  background: #fff;
+  border: 2px solid #d1d5db;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #6b7280;
+  transition: all 0.15s;
+}
+
+.mode-btn:hover {
+  border-color: #3b82f6;
+  color: #3b82f6;
+}
+
+.mode-btn.active {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  color: #fff;
+}
+
+.mode-hint {
+  margin-left: auto;
+  color: #9ca3af;
+  font-size: 11px;
 }
 
 .welcome-tip {
@@ -811,10 +965,15 @@ body {
   border-top: 1px solid #e5e7eb;
   background: #fff;       /* 防止被滚动消息透出 */
   display: flex;
+  flex-direction: column; /* 【2026-06-28 修复】切换条在上，输入行在下 */
+}
+
+.input-row {
+  display: flex;
   gap: 12px;
 }
 
-.input-area textarea {
+.input-row textarea {
   flex: 1;
   min-height: 44px;       /* 单行最小高度 */
   max-height: 120px;      /* 【修复 2026-06-27】多行输入也不撑爆父容器 */
@@ -827,7 +986,7 @@ body {
   overflow-y: auto;       /* 内容超过 max-height 时内部滚动 */
 }
 
-.input-area textarea:focus {
+.input-row textarea:focus {
   outline: none;
   border-color: #3b82f6;
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);

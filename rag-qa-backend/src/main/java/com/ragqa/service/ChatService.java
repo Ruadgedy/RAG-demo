@@ -3,14 +3,18 @@ package com.ragqa.service;
 import com.ragqa.dto.ChatRequest;
 import com.ragqa.dto.ChatResponse;
 import com.ragqa.model.ChatHistory;
+import com.ragqa.model.User;
 import com.ragqa.repository.ChatHistoryRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.UUID;
 
@@ -50,92 +54,107 @@ public class ChatService {
      * 等待LLM生成完整回答后一次性返回，同时把 user 问题和 assistant 回答
      * 持久化到 chat_history 表（共享同一 sessionId），供前端「聊天历史」展示。
      *
-     * 【修复 2026-06-27 部署反馈】
-     * 部署后历史未落库，问题在于：
-     * 1. save() 在无事务包裹时不立即 flush，依赖隐式事务可能丢失
-     * 2. catch 只 log warn + message，定位不到真实异常（DataIntegrityViolation 等）
-     * 3. 没显式 @Transactional 边界，RagService 内部若抛出导致事务回滚，save 也连带回滚
-     *
-     * 修复：saveAndFlush 强制立即写入 + @Transactional + 异常 stack trace。
+     * 【修复 2026-06-28】
+     * 1. 移除 @Transactional：每次 saveAndFlush() 独立自动提交（无事务时 JPA 默认 auto-commit），
+     *    这样即使 RagService 抛异常，已保存的 user 问题不会回滚丢失
+     * 2. 从 SecurityContext 提取 userId，关联到每条历史记录
+     * 3. 将 RagService 调用包裹在 try/catch 中，失败时保存错误提示作为 assistant 记录
      *
      * @param request 问答请求（包含问题和知识库ID）
      * @return ChatResponse（含 sessionId 与 answer）
      */
-    @Transactional
     public ChatResponse chat(ChatRequest request) {
-        log.info("收到问答请求: {}", request.getMessage());
+        String userId = getCurrentUserId();
+        log.info("收到问答请求: userId={}, message={}", userId, request.getMessage());
 
         // 生成本次问答的会话ID，user 与 assistant 两条记录共享
         String sessionId = UUID.randomUUID().toString();
 
-        // 1. 持久化用户问题（saveAndFlush 强制立即写入，失败立即抛出异常）
-        saveHistory(sessionId, request.getKnowledgeBaseId(), "user", request.getMessage());
+        // 1. 持久化用户问题（saveAndFlush 无事务时自动提交，不受后续异常影响）
+        saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "user", request.getMessage());
 
-        // 2. 委托给 RagService 执行检索增强生成
-        String answer = ragService.chat(request.getMessage(), request.getKnowledgeBaseId());
+        // 2. 委托给 RagService 执行检索增强生成（单独 try/catch 保护）
+        String answer;
+        try {
+            answer = ragService.chat(request.getMessage(), request.getKnowledgeBaseId());
+        } catch (Exception e) {
+            log.error("RAG 问答失败: sessionId={}", sessionId, e);
+            answer = "抱歉，AI服务暂时不可用，请稍后重试。";
+        }
 
         // 3. 持久化 AI 回答
-        saveHistory(sessionId, request.getKnowledgeBaseId(), "assistant", answer);
+        saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", answer);
 
-        log.info("问答完成并落库: sessionId={}", sessionId);
+        log.info("问答完成并落库: sessionId={}, userId={}", sessionId, userId);
         return new ChatResponse(sessionId, answer);
     }
 
     /**
      * 保存单条聊天历史记录。
      *
-     * 【修复 2026-06-27】
-     * - 使用 saveAndFlush 替代 save，强制立即写入数据库（避免依赖外层事务 commit）
-     * - 异常日志增加 stack trace（之前只打 message，定位 DataIntegrity 之类错误困难）
-     * - 成功时打 info 日志，便于排查「是否真的落库了」
+     * 【修复 2026-06-28】
+     * - 使用 saveAndFlush 强制立即写入（无事务时 auto-commit，有事务时 flush 到 DB）
+     * - 成功时用 info 级别日志（原来 debug 太低，生产环境看不到）
+     * - 失败时 log.error 带完整堆栈
+     * - 新增 userId 参数关联到具体用户
      *
      * 容错策略：历史记录属于辅助功能，持久化失败不应影响主问答流程，
      * 因此捕获异常仅记录 error 日志（带堆栈），不向上抛出。
      */
-    private void saveHistory(String sessionId, java.util.UUID knowledgeBaseId, String role, String content) {
+    private void saveHistory(String sessionId, UUID knowledgeBaseId, String userId, String role, String content) {
         try {
             ChatHistory history = new ChatHistory();
             history.setSessionId(sessionId);
             history.setKnowledgeBaseId(knowledgeBaseId);
+            history.setUserId(userId);
             history.setRole(role);
             history.setContent(content);
             ChatHistory saved = chatHistoryRepository.saveAndFlush(history);
-            log.debug("聊天历史已落库: id={}, sessionId={}, role={}", saved.getId(), sessionId, role);
+            log.info("聊天历史已落库: id={}, sessionId={}, userId={}, role={}, contentLength={}",
+                    saved.getId(), sessionId, userId, role, content != null ? content.length() : 0);
         } catch (Exception e) {
-            // 关键修复：传 e 作为最后一个参数，让 SLF4J 输出完整堆栈
-            log.error("保存聊天历史失败（不阻断问答）: sessionId={}, role={}",
-                    sessionId, role, e);
+            log.error("保存聊天历史失败（不阻断问答）: sessionId={}, userId={}, role={}",
+                    sessionId, userId, role, e);
         }
     }
     
     /**
      * 流式问答
      *
-     * 通过Flux流式返回回答片段（SSE）。
+     * 通过Flux流式返回回答片段（SSE），每个 chunk 立即推送给客户端，
+     * 同时在后台累积完整回答，流结束后保存到数据库。
      *
-     * 【修复 2026-06-27 部署反馈】
-     * 原实现完全没保存历史——一旦前端切换到流式接口，聊天历史侧边栏就为空。
-     * 现改造：
-     * 1. 进入方法先生成 sessionId，立即保存 user 问题
-     * 2. 流式响应通过 .collectList().map() 收集完整内容后再保存 assistant 回答
-     * 3. doOnError 保存"流式生成失败"提示作为 assistant 内容（保证前端历史可追溯）
+     * 【修复 2026-06-28】
+     * 1. 用 doOnNext() 累积 chunk + doOnComplete() 保存，替代 collectList() 缓冲全量再重发
+     *    —— 之前 collectList 会等所有 chunk 到齐才返回，完全不是真正的流式
+     * 2. 新增 userId 关联
+     * 3. 进入方法立即保存 user 问题（saveAndFlush 无事务自动提交）
+     * 4. doOnError 保存错误提示作为 assistant 记录
      *
      * @param request 问答请求
      * @return Flux<String> - 回答片段流
      */
     public Flux<String> streamChat(ChatRequest request) {
-        log.info("收到流式问答请求: {}, streamingEnabled={}", request.getMessage(), streamingEnabled);
+        String userId = getCurrentUserId();
+        log.info("收到流式问答请求: userId={}, message={}, streamingEnabled={}",
+                userId, request.getMessage(), streamingEnabled);
 
         // 生成本次问答的会话ID（与非流式保持一致语义）
         String sessionId = UUID.randomUUID().toString();
 
-        // 1. 立即保存 user 问题（saveAndFlush 立即写入，不依赖后续事务）
-        saveHistory(sessionId, request.getKnowledgeBaseId(), "user", request.getMessage());
+        // 1. 立即保存 user 问题（saveAndFlush 无事务自动提交，不受后续异常影响）
+        saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "user", request.getMessage());
 
         // 如果配置关闭了流式，则回退到非流式
         if (!streamingEnabled) {
-            String response = ragService.chat(request.getMessage(), request.getKnowledgeBaseId());
-            saveHistory(sessionId, request.getKnowledgeBaseId(), "assistant", response);
+            String response;
+            try {
+                response = ragService.chat(request.getMessage(), request.getKnowledgeBaseId());
+            } catch (Exception e) {
+                log.error("非流式回退失败: sessionId={}", sessionId, e);
+                response = "抱歉，AI服务暂时不可用，请稍后重试。";
+            }
+            saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", response);
             return Flux.just(response);
         }
 
@@ -145,7 +164,7 @@ public class ChatService {
 
             if (docs.isEmpty()) {
                 String emptyMsg = "该知识库暂无文档，请先上传文档。";
-                saveHistory(sessionId, request.getKnowledgeBaseId(), "assistant", emptyMsg);
+                saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", emptyMsg);
                 return Flux.just(emptyMsg);
             }
 
@@ -153,32 +172,35 @@ public class ChatService {
             String context = buildContext(docs);
             String prompt = buildPrompt(context, request.getMessage());
 
-            // 4. 调用LLM，返回流式响应
-            // .stream()会将响应拆分成多个片段
-            // .content()获取内容流
+            // 4. 调用LLM，返回真正的流式响应
+            //    - doOnNext: 每个 chunk 立即透传给客户端（不缓冲），同时在 StringBuilder 中累积
+            //    - doOnComplete: 所有 chunk 发送完毕后，保存完整回答到数据库
+            //    - doOnError: 流式失败时保存错误提示
+            StringBuilder accumulator = new StringBuilder();
+
             return chatClientBuilder.build()
                     .prompt(prompt)
                     .stream()
                     .content()
-                    .collectList()                                  // 收集所有片段
-                    .map(chunks -> {
-                        // 拼接完整回答
-                        String fullAnswer = String.join("", chunks);
-                        saveHistory(sessionId, request.getKnowledgeBaseId(), "assistant", fullAnswer);
-                        log.info("流式问答完成并落库: sessionId={}", sessionId);
-                        return chunks;
+                    .doOnNext(chunk -> accumulator.append(chunk))
+                    .doOnComplete(() -> {
+                        // 把阻塞的 JPA 操作调度到弹性线程池，避免在 Netty 事件循环中执行
+                        String fullAnswer = accumulator.toString();
+                        Mono.fromRunnable(() -> {
+                            saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", fullAnswer);
+                            log.info("流式问答完成并落库: sessionId={}, userId={}, answerLength={}",
+                                    sessionId, userId, fullAnswer.length());
+                        }).subscribeOn(Schedulers.boundedElastic()).subscribe();
                     })
-                    .flatMapMany(Flux::fromIterable)
                     .doOnError(e -> {
-                        log.error("流式响应错误: {}", e.getMessage(), e);
-                        // 流式失败时保存错误提示，方便前端历史展示
-                        saveHistory(sessionId, request.getKnowledgeBaseId(), "assistant",
+                        log.error("流式响应错误: sessionId={}", sessionId, e);
+                        saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant",
                                 "抱歉，AI服务暂时不可用，请稍后重试。");
                     });
         } catch (Exception e) {
-            log.error("流式问答失败: {}", e.getMessage(), e);
+            log.error("流式问答失败: sessionId={}", sessionId, e);
             String errorMsg = "抱歉，AI服务暂时不可用，请稍后重试。";
-            saveHistory(sessionId, request.getKnowledgeBaseId(), "assistant", errorMsg);
+            saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", errorMsg);
             return Flux.just(errorMsg);
         }
     }
@@ -219,5 +241,21 @@ public class ChatService {
 
             === 回答 ===
             """.formatted(context, question);
+    }
+
+    /**
+     * 从 Spring Security 上下文提取当前用户ID（username）。
+     *
+     * JwtAuthenticationFilter 在请求进入时把 User（实现 UserDetails）
+     * 存入 SecurityContext 的 principal，这里安全地取出。
+     * 如果上下文为空（理论上不会，因为 /api/** 需要认证），返回 "unknown"。
+     */
+    private String getCurrentUserId() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null && auth.getPrincipal() instanceof User user) {
+            return user.getUsername();
+        }
+        log.warn("SecurityContext 中未找到用户信息，可能认证已失效");
+        return "unknown";
     }
 }
