@@ -71,35 +71,49 @@ public class RagService {
     public record RetrievalResult(String content, String source, double score) {}
 
     /**
-     * 处理用户问答（非流式）
-     * 
+     * RAG 问答结果（V3 新增：含 RAG 召回元数据，用于持久化到 chat_history.rag_metadata）。
+     *
+     * @param answer LLM 生成的最终回答
+     * @param retrievedDocs 实际参与本次生成的检索结果列表（已按知识库过滤）
+     * @param retrievalDurationMs 检索阶段耗时（毫秒）
+     */
+    public record ChatResult(String answer, List<RetrievalResult> retrievedDocs, long retrievalDurationMs) {}
+
+    /**
+     * 处理用户问答（非流式），返回含 RAG 元数据的结果。
+     *
+     * 【V3 变更】返回值从 String 改为 ChatResult，便于 ChatService 拼装 rag_metadata JSON
+     * 落库到 chat_history 表。
+     *
      * @param message 用户问题
      * @param knowledgeBaseId 知识库ID
-     * @return LLM生成的回答
+     * @return ChatResult（answer + 召回列表 + 检索耗时）
      */
-    public String chat(String message, UUID knowledgeBaseId) {
+    public ChatResult chat(String message, UUID knowledgeBaseId) {
         log.info("RAG问答: {}", message);
 
         // 1. 检查知识库是否有已处理的文档
         List<Document> documents = documentRepository.findByKnowledgeBaseId(knowledgeBaseId);
-        
+
         boolean hasCompletedDocs = documents.stream()
                 .anyMatch(doc -> doc.getStatus() == Document.DocumentStatus.COMPLETED);
-        
+
         if (!hasCompletedDocs) {
-            return "该知识库暂无文档，请先上传文档。";
+            return new ChatResult("该知识库暂无文档，请先上传文档。", java.util.List.of(), 0L);
         }
 
-        // 2. 检索相关文档（从Chroma向量数据库）
+        // 2. 检索相关文档（从Chroma向量数据库）—— 计时
+        long retrievalStart = System.currentTimeMillis();
         List<RetrievalResult> retrieved = retrieve(message, knowledgeBaseId);
-        
+        long retrievalDurationMs = System.currentTimeMillis() - retrievalStart;
+
         if (retrieved.isEmpty()) {
-            return "该知识库暂无文档，请先上传文档。";
+            return new ChatResult("该知识库暂无文档，请先上传文档。", java.util.List.of(), retrievalDurationMs);
         }
-        
+
         // 3. 构建上下文：将检索到的文档拼接成上下文字符串
         String context = buildContext(retrieved);
-        
+
         // 4. 构建提示词：将上下文和问题组合成完整提示
         String prompt = buildPrompt(context, message);
 
@@ -109,24 +123,24 @@ public class RagService {
                     .prompt(prompt)
                     .call()
                     .content();
-            
+
             if (response == null || response.isEmpty()) {
                 log.warn("LLM返回空响应，可能余额不足");
-                return "AI服务余额不足，请联系管理员充值后继续使用。";
+                return new ChatResult("AI服务余额不足，请联系管理员充值后继续使用。", retrieved, retrievalDurationMs);
             }
-            
-            return response;
+
+            return new ChatResult(response, retrieved, retrievalDurationMs);
         } catch (Exception e) {
             log.error("LLM调用失败: {}", e.getMessage());
-            
+
             // 检查是否是余额不足错误
             String errorMsg = e.getMessage();
-            if (errorMsg != null && (errorMsg.contains("insufficient_balance") || 
+            if (errorMsg != null && (errorMsg.contains("insufficient_balance") ||
                 errorMsg.contains("insufficient balance") || errorMsg.contains("1008"))) {
-                return "AI服务余额不足，请联系管理员充值后继续使用。";
+                return new ChatResult("AI服务余额不足，请联系管理员充值后继续使用。", retrieved, retrievalDurationMs);
             }
-            
-            return "抱歉，AI服务暂时不可用，请稍后重试。";
+
+            return new ChatResult("抱歉，AI服务暂时不可用，请稍后重试。", retrieved, retrievalDurationMs);
         }
     }
 

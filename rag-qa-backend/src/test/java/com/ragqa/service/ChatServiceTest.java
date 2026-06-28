@@ -50,14 +50,17 @@ class ChatServiceTest {
         request.setMessage("测试问题");
         request.setKnowledgeBaseId(kbId);
 
-        when(ragService.chat("测试问题", kbId)).thenReturn("这是测试回答");
+        // 【V3】RagService.chat() 现在返回 ChatResult(answer, retrievedDocs, retrievalDurationMs)
+        when(ragService.chat("测试问题", kbId))
+                .thenReturn(new com.ragqa.service.RagService.ChatResult(
+                        "这是测试回答", java.util.List.of(), 0L));
 
         ChatResponse result = chatService.chat(request);
 
         assertThat(result.getAnswer()).isEqualTo("这是测试回答");
         assertThat(result.getSessionId()).isNotNull();
-        // user 问题与 assistant 回答两条记录都应被持久化（saveAndFlush 强制立即写入）
-        verify(chatHistoryRepository, times(2)).saveAndFlush(any());
+        // 【V3】一个回合 = 一条记录（query + content + rag_metadata）
+        verify(chatHistoryRepository, times(1)).saveAndFlush(any());
         verify(ragService).chat("测试问题", kbId);
     }
 
@@ -68,7 +71,10 @@ class ChatServiceTest {
         request.setMessage("测试问题");
         request.setKnowledgeBaseId(kbId);
 
-        when(ragService.chat("测试问题", kbId)).thenReturn("该知识库暂无文档，请先上传文档。");
+        // 【V3】RagService.chat() 返回 ChatResult
+        when(ragService.chat("测试问题", kbId))
+                .thenReturn(new com.ragqa.service.RagService.ChatResult(
+                        "该知识库暂无文档，请先上传文档。", java.util.List.of(), 0L));
 
         ChatResponse result = chatService.chat(request);
 
