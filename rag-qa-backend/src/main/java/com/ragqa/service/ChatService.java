@@ -71,7 +71,13 @@ public class ChatService {
         String sessionId = UUID.randomUUID().toString();
 
         // 1. 持久化用户问题（saveAndFlush 无事务时自动提交，不受后续异常影响）
-        saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "user", request.getMessage());
+        try {
+            saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "user", request.getMessage());
+        } catch (Exception e) {
+            // 【修复 2026-06-28】不静默吞——记录 WARN 级别告警
+            log.warn("[落库告警] user 问题持久化失败: sessionId={}, userId={}, message={}",
+                    sessionId, userId, request.getMessage(), e);
+        }
 
         // 2. 委托给 RagService 执行检索增强生成（单独 try/catch 保护）
         String answer;
@@ -83,39 +89,38 @@ public class ChatService {
         }
 
         // 3. 持久化 AI 回答
-        saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", answer);
+        try {
+            saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", answer);
+        } catch (Exception e) {
+            // 【修复 2026-06-28】不静默吞——记录 WARN 级别告警
+            log.warn("[落库告警] assistant 回答持久化失败: sessionId={}, userId={}, answerLength={}",
+                    sessionId, userId, answer == null ? 0 : answer.length(), e);
+        }
 
-        log.info("问答完成并落库: sessionId={}, userId={}", sessionId, userId);
+        log.info("问答完成: sessionId={}, userId={}, answerLength={}", sessionId, userId, answer == null ? 0 : answer.length());
         return new ChatResponse(sessionId, answer);
     }
 
     /**
      * 保存单条聊天历史记录。
      *
-     * 【修复 2026-06-28】
-     * - 使用 saveAndFlush 强制立即写入（无事务时 auto-commit，有事务时 flush 到 DB）
-     * - 成功时用 info 级别日志（原来 debug 太低，生产环境看不到）
-     * - 失败时 log.error 带完整堆栈
-     * - 新增 userId 参数关联到具体用户
+     * 【修复 2026-06-28 第三次】不再静默吞异常——
+     *   历史落库失败时把异常向上抛出，由 chat()/streamChat() 的调用方
+     *   记录 WARN 级别告警。这样 schema 不匹配、SQL 错误等致命问题不会再被
+     *   隐藏为"AI 回答正常 + 0 条落库"的反模式 bug。
      *
-     * 容错策略：历史记录属于辅助功能，持久化失败不应影响主问答流程，
-     * 因此捕获异常仅记录 error 日志（带堆栈），不向上抛出。
+     * @throws RuntimeException 当数据库写入失败时抛出
      */
     private void saveHistory(String sessionId, UUID knowledgeBaseId, String userId, String role, String content) {
-        try {
-            ChatHistory history = new ChatHistory();
-            history.setSessionId(sessionId);
-            history.setKnowledgeBaseId(knowledgeBaseId);
-            history.setUserId(userId);
-            history.setRole(role);
-            history.setContent(content);
-            ChatHistory saved = chatHistoryRepository.saveAndFlush(history);
-            log.info("聊天历史已落库: id={}, sessionId={}, userId={}, role={}, contentLength={}",
-                    saved.getId(), sessionId, userId, role, content != null ? content.length() : 0);
-        } catch (Exception e) {
-            log.error("保存聊天历史失败（不阻断问答）: sessionId={}, userId={}, role={}",
-                    sessionId, userId, role, e);
-        }
+        ChatHistory history = new ChatHistory();
+        history.setSessionId(sessionId);
+        history.setKnowledgeBaseId(knowledgeBaseId);
+        history.setUserId(userId);
+        history.setRole(role);
+        history.setContent(content);
+        ChatHistory saved = chatHistoryRepository.saveAndFlush(history);
+        log.info("聊天历史已落库: id={}, sessionId={}, userId={}, role={}, contentLength={}",
+                saved.getId(), sessionId, userId, role, content != null ? content.length() : 0);
     }
     
     /**
@@ -143,7 +148,13 @@ public class ChatService {
         String sessionId = UUID.randomUUID().toString();
 
         // 1. 立即保存 user 问题（saveAndFlush 无事务自动提交，不受后续异常影响）
-        saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "user", request.getMessage());
+        //    【修复 2026-06-28】不静默吞——失败时 WARN 告警
+        try {
+            saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "user", request.getMessage());
+        } catch (Exception e) {
+            log.warn("[落库告警] user 问题持久化失败: sessionId={}, userId={}, message={}",
+                    sessionId, userId, request.getMessage(), e);
+        }
 
         // 如果配置关闭了流式，则回退到非流式
         if (!streamingEnabled) {
@@ -154,7 +165,12 @@ public class ChatService {
                 log.error("非流式回退失败: sessionId={}", sessionId, e);
                 response = "抱歉，AI服务暂时不可用，请稍后重试。";
             }
-            saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", response);
+            try {
+                saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", response);
+            } catch (Exception e) {
+                log.warn("[落库告警] assistant 回答持久化失败: sessionId={}, userId={}",
+                        sessionId, userId, e);
+            }
             return Flux.just(response);
         }
 
@@ -164,7 +180,12 @@ public class ChatService {
 
             if (docs.isEmpty()) {
                 String emptyMsg = "该知识库暂无文档，请先上传文档。";
-                saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", emptyMsg);
+                try {
+                    saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", emptyMsg);
+                } catch (Exception e) {
+                    log.warn("[落库告警] 空知识库提示持久化失败: sessionId={}, userId={}",
+                            sessionId, userId, e);
+                }
                 return Flux.just(emptyMsg);
             }
 
@@ -187,20 +208,36 @@ public class ChatService {
                         // 把阻塞的 JPA 操作调度到弹性线程池，避免在 Netty 事件循环中执行
                         String fullAnswer = accumulator.toString();
                         Mono.fromRunnable(() -> {
-                            saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", fullAnswer);
-                            log.info("流式问答完成并落库: sessionId={}, userId={}, answerLength={}",
-                                    sessionId, userId, fullAnswer.length());
+                            try {
+                                saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", fullAnswer);
+                                log.info("流式问答完成并落库: sessionId={}, userId={}, answerLength={}",
+                                        sessionId, userId, fullAnswer.length());
+                            } catch (Exception e) {
+                                // 【修复 2026-06-28】不静默吞——失败时 WARN 告警
+                                log.warn("[落库告警] 流式 assistant 回答持久化失败: sessionId={}, userId={}, answerLength={}",
+                                        sessionId, userId, fullAnswer.length(), e);
+                            }
                         }).subscribeOn(Schedulers.boundedElastic()).subscribe();
                     })
                     .doOnError(e -> {
                         log.error("流式响应错误: sessionId={}", sessionId, e);
-                        saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant",
-                                "抱歉，AI服务暂时不可用，请稍后重试。");
+                        try {
+                            saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant",
+                                    "抱歉，AI服务暂时不可用，请稍后重试。");
+                        } catch (Exception ex) {
+                            log.warn("[落库告警] 错误提示持久化失败: sessionId={}, userId={}",
+                                    sessionId, userId, ex);
+                        }
                     });
         } catch (Exception e) {
             log.error("流式问答失败: sessionId={}", sessionId, e);
             String errorMsg = "抱歉，AI服务暂时不可用，请稍后重试。";
-            saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", errorMsg);
+            try {
+                saveHistory(sessionId, request.getKnowledgeBaseId(), userId, "assistant", errorMsg);
+            } catch (Exception ex) {
+                log.warn("[落库告警] 错误提示持久化失败: sessionId={}, userId={}",
+                        sessionId, userId, ex);
+            }
             return Flux.just(errorMsg);
         }
     }

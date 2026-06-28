@@ -102,7 +102,15 @@
               <div class="avatar">{{ msg.role === 'user' ? '你' : 'AI' }}</div>
               <div class="content" v-html="renderMarkdown(msg.content)"></div>
             </div>
-            <div v-if="loading" class="message assistant">
+            <!--
+              【修复 2026-06-28】消除「两个 AI 回复」的 bug
+              原代码无条件显示此 loading 块，但流式模式下 sendStreamMessage
+              已经在 messages 列表里 push 了一个空 assistant 占位消息（逐字填充），
+              导致同一个 AI 位置同时出现「内容累积中的 assistant 消息」+「loading 块」，
+              看起来像两次回答；流式结束前 loading 卡 true 时 loading 块还不消失。
+              现在仅在非流式模式下显示此块——流式模式由 messages 中的占位 assistant 充当 loading 指示。
+            -->
+            <div v-if="loading && !streamMode" class="message assistant">
               <div class="avatar">AI</div>
               <div class="content loading">
                 <span class="dot">.</span>
