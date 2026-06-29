@@ -264,12 +264,14 @@ public class DocumentProcessService {
      * 分多次读取并追加到临时文件，避免大文本 OOM。
      */
     private Path streamParseToTempFile(Path filePath, UUID documentId) throws Exception {
+        Path tempDirPath = Paths.get(tempDir).toAbsolutePath().normalize();
+        Files.createDirectories(tempDirPath);  // 【修复】先创建临时目录
+
         Path tempFile = Files.createTempFile(
-            Paths.get(tempDir).toAbsolutePath().normalize(),
+            tempDirPath,
             "parse_" + documentId + "_",
             ".txt"
         );
-        Files.createDirectories(tempFile.getParent());
 
         log.info("流式解析到临时文件: {}", tempFile);
 
@@ -371,8 +373,11 @@ public class DocumentProcessService {
      * 【2026-06-29 P1-05】将文本写入临时文件（支持大文本）
      */
     private Path writeTextToTempFile(String text, UUID documentId) throws Exception {
+        Path tempDirPath = Paths.get(tempDir).toAbsolutePath().normalize();
+        Files.createDirectories(tempDirPath);  // 【修复】先创建临时目录
+
         Path tempFile = Files.createTempFile(
-            Paths.get(tempDir).toAbsolutePath().normalize(),
+            tempDirPath,
             "text_" + documentId + "_",
             ".txt"
         );
