@@ -81,11 +81,32 @@ public class DocumentService {
             throw new IllegalArgumentException("不支持的文件类型: " + fileType + "，仅支持 PDF、DOC、DOCX、XLS、XLSX、PPT、PPTX、TXT");
         }
 
-        // 【2026-06-29 增量 P1-04】按文件内容 SHA-256 做内容级去重
-        // 计算哈希：50MB 文件约 50ms，可接受
-        // 双层校验：先查 DB（友好错误信息），再依赖唯一约束（防并发竞态）
-        byte[] fileBytes = file.getBytes();
-        String fileHash = sha256Hex(fileBytes);
+        // 【2026-06-29 增量 P1-04/P1-05】文件内容 SHA-256 做内容级去重
+        // 【P1-05 升级】改为流式计算 + 先写文件再算哈希，避免 200MB 文件 OOM
+        // 流程：1) 创建上传目录 2) 流式保存文件到磁盘 3) 从磁盘流式计算 SHA-256
+        Path uploadRoot = Paths.get(uploadDir).toAbsolutePath().normalize();
+        Path uploadPath = uploadRoot.resolve(knowledgeBaseId.toString()).normalize();
+
+        // 【路径遍历防护】
+        if (fileName != null && (fileName.contains("/") || fileName.contains("\\"))) {
+            throw new IllegalArgumentException("非法文件名: " + fileName);
+        }
+        Path filePath = uploadPath.resolve(Paths.get(fileName).getFileName()).normalize();
+        if (!filePath.startsWith(uploadRoot)) {
+            throw new IllegalArgumentException("非法文件名: " + fileName);
+        }
+
+        Files.createDirectories(uploadPath);
+
+        // 流式保存文件到磁盘（不占用堆内存）
+        try {
+            Files.copy(file.getInputStream(), filePath);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("文件保存失败: " + e.getMessage());
+        }
+
+        // 流式计算 SHA-256（从磁盘文件读取，不占用堆内存）
+        String fileHash = sha256HexStream(filePath);
 
         Optional<Document> existingByHash = documentRepository.findByKnowledgeBaseIdAndFileHash(knowledgeBaseId, fileHash);
         if (existingByHash.isPresent()) {
@@ -98,39 +119,6 @@ public class DocumentService {
         Optional<Document> existingDoc = documentRepository.findByKnowledgeBaseIdAndFileName(knowledgeBaseId, fileName);
         if (existingDoc.isPresent()) {
             throw new IllegalArgumentException("文件名已存在: " + fileName);
-        }
-
-        // 创建上传目录
-        Path uploadRoot = Paths.get(uploadDir).toAbsolutePath().normalize();
-        Path uploadPath = uploadRoot.resolve(knowledgeBaseId.toString()).normalize();
-
-        // 【路径遍历防护】
-        // 第一层防御：文件名不能包含任何路径分隔符（/ 或 \）
-        // 这是必要的，因为 getFileName() 会把 "../../etc/passwd" 截成 "passwd"，
-        // 单独的 normalize + startsWith 检查无法发现攻击。
-        if (fileName != null && (fileName.contains("/") || fileName.contains("\\"))) {
-            throw new IllegalArgumentException("非法文件名: " + fileName);
-        }
-
-        // 第二层防御：getFileName + normalize + 边界校验（防御 NUL 字节、特殊 Unicode 等）
-        Path filePath = uploadPath.resolve(Paths.get(fileName).getFileName()).normalize();
-        if (!filePath.startsWith(uploadRoot)) {
-            throw new IllegalArgumentException("非法文件名: " + fileName);
-        }
-
-        Files.createDirectories(uploadPath);
-
-        try {
-            Files.copy(file.getInputStream(), filePath);
-        } catch (IOException e) {
-            // 上传失败，创建失败记录
-            Document doc = new Document();
-            doc.setKnowledgeBaseId(knowledgeBaseId);
-            doc.setFileName(fileName);
-            doc.setFileType(fileType);
-            doc.setStatus(Document.DocumentStatus.UPLOAD_FAILED);
-            doc.setErrorMessage("文件上传失败: " + e.getMessage());
-            return documentRepository.save(doc);
         }
 
         // 创建文档记录
@@ -237,30 +225,35 @@ public class DocumentService {
     }
 
     /**
-     * 【2026-06-29 增量 P1-04】计算文件内容的 SHA-256（hex 编码）
+     * 【2026-06-29 增量 P1-05】流式计算文件的 SHA-256（从磁盘读取，分块处理不占堆内存）
      *
-     * 用法：上传时算哈希 → 查 (kb_id, file_hash) 是否重复
+     * 原理：DigestInputStream 包装文件输入流，逐块读取并更新 MessageDigest，
+     *       最终生成 64 字符的 hex 字符串。
      *
-     * 为什么是 SHA-256：
-     *   - 抗碰撞：生日攻击需 2^128 次，不可行
-     *   - 速度：JDK 自带 MessageDigest，50MB 文件约 50ms
-     *   - 长度固定：64 hex 字符，便于建索引
-     *
-     * @param fileBytes 文件原始字节
+     * @param filePath 文件路径
      * @return 64 字符 hex 字符串（小写）
      */
-    private String sha256Hex(byte[] fileBytes) {
+    private String sha256HexStream(Path filePath) {
         try {
-            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] hash = md.digest(fileBytes);
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            try (java.security.DigestInputStream dis = new java.security.DigestInputStream(
+                    Files.newInputStream(filePath), digest)) {
+                // 逐块读取，触发摘要更新
+                byte[] buf = new byte[8192];  // 8KB buffer，不占堆
+                while (dis.read(buf) != -1) {
+                    // DigestInputStream.update() 已由 read() 自动调用
+                }
+            }
+            byte[] hash = digest.digest();
             StringBuilder sb = new StringBuilder(hash.length * 2);
             for (byte b : hash) {
                 sb.append(String.format("%02x", b));
             }
             return sb.toString();
         } catch (java.security.NoSuchAlgorithmException e) {
-            // SHA-256 是 JDK 必有的算法，这里抛 RuntimeException 仅作兜底
             throw new RuntimeException("SHA-256 算法不可用", e);
+        } catch (IOException e) {
+            throw new RuntimeException("计算文件哈希失败: " + e.getMessage(), e);
         }
     }
 }

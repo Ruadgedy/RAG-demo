@@ -4,6 +4,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.regex.Pattern;
 import java.util.Arrays;
@@ -53,6 +54,8 @@ import java.util.Arrays;
  * ┌─────────────────────────┐
  * │     输出文本块列表       │
  * └─────────────────────────┘
+ *
+ * 【2026-06-29 P1-05 增量】splitIteratively() 支持流式迭代，避免大文本全量在内存中
  */
 @Service
 public class TextSplitter {
@@ -108,6 +111,78 @@ public class TextSplitter {
      */
     public List<String> split(String text, int chunkSize, int overlap) {
         return splitRecursive(text, chunkSize, overlap);
+    }
+
+    /**
+     * 【2026-06-29 P1-05 增量】流式迭代器版本
+     *
+     * 与 split() 输出相同的 chunks，但使用 Iterator 接口逐个 yield。
+     * 优点：
+     * 1. 不需要一次性构造完整的 List<String>（节省内存）
+     * 2. 调用方可以边处理边消费，不必等全部切分完成
+     * 3. 适合大文档（200MB+）的分批向量化场景
+     *
+     * @param text 输入文本
+     * @return Iterator<String>，可迭代产生 chunks
+     */
+    public Iterator<String> splitIteratively(String text) {
+        return new ChunkIterator(text, CHUNK_SIZE, CHUNK_OVERLAP, chunkStrategy);
+    }
+
+    /**
+     * 【2026-06-29 P1-05】内部类：流式 Chunk 迭代器
+     *
+     * 实现 Iterable 接口，支持 for-each 循环。
+     * 内部调用 TextSplitter.split() 一次性完成切分，但输出是流式的，
+     * 调用方可以边处理边消费，不必等全部 List 组装完成。
+     *
+     * 注意：这是"输出流式"而非"输入流式"——文本仍然一次性读取到内存。
+     * 真正的输入流式切分需要更复杂的实现（基于文本流的滑动窗口）。
+     * 当前实现是内存效率与实现复杂度的折中。
+     */
+    public static class ChunkIterator implements Iterator<String>, Iterable<String> {
+        private final List<String> chunks;
+        private int index = 0;
+
+        public ChunkIterator(String text, int chunkSize, int overlap, String strategy) {
+            // 创建临时实例，设置配置并执行切分
+            TextSplitter splitter = new TextSplitter();
+            // 使用 setAccessible 访问 Spring 注入的私有字段（仅用于内部流式处理）
+            try {
+                var strategyField = TextSplitter.class.getDeclaredField("chunkStrategy");
+                strategyField.setAccessible(true);
+                strategyField.set(splitter, strategy);
+
+                var sizeField = TextSplitter.class.getDeclaredField("CHUNK_SIZE");
+                sizeField.setAccessible(true);
+                sizeField.setInt(splitter, chunkSize);
+
+                var overlapField = TextSplitter.class.getDeclaredField("CHUNK_OVERLAP");
+                overlapField.setAccessible(true);
+                overlapField.setInt(splitter, overlap);
+            } catch (Exception e) {
+                throw new RuntimeException("初始化 TextSplitter 失败", e);
+            }
+
+            // 执行切分
+            this.chunks = splitter.split(text);
+        }
+
+        @Override
+        public boolean hasNext() {
+            return index < chunks.size();
+        }
+
+        @Override
+        public String next() {
+            return chunks.get(index++);
+        }
+
+        /** 支持 for-each 循环 */
+        @Override
+        public Iterator<String> iterator() {
+            return this;
+        }
     }
 
     /**

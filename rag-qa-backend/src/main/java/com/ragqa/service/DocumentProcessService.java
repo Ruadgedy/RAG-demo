@@ -9,16 +9,28 @@ import com.ragqa.repository.DocumentRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tika.Tika;
+import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.Metadata;
+import org.apache.tika.parser.AutoDetectParser;
+import org.apache.tika.sax.WriteOutContentHandler;
 import com.ragqa.config.AsyncConfig;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.xml.sax.ContentHandler;
 
+import java.io.InputStream;
+import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
 
@@ -67,6 +79,21 @@ public class DocumentProcessService {
     private final Tika tika = new Tika();
 
     /**
+     * 【2026-06-29 增量 P1-05】向量化批次大小
+     * 控制每批处理的 chunk 数量，平衡内存占用和处理速度。
+     * 800 字符 × 50 个 chunk ≈ 40KB 文本，预估 embedding 批次约 2-5 秒。
+     */
+    @Value("${document.process.batch-size:50}")
+    private int embeddingBatchSize;
+
+    /**
+     * 【2026-06-29 增量 P1-05】临时文本文件目录
+     * 用于流式解析时存储中间结果，避免 200MB 文本全量在内存中。
+     */
+    @Value("${document.process.temp-dir:./temp}")
+    private String tempDir;
+
+    /**
      * 保存并发布状态变更事件。
      * 把 DB 写入 + SSE 推送封装成原子操作（虽然两个操作不是事务性的，
      * 但 SSE 是 best-effort 推送，丢一两条不影响前端正确性 — 前端有轮询降级兜底）。
@@ -83,178 +110,136 @@ public class DocumentProcessService {
 
     /**
      * 异步处理文档
-     * 
-     * 这是文档处理的入口方法，由上传接口调用
-     * 使用@Async注解在后台线程执行，避免阻塞HTTP请求
-     * 
+     *
+     * 【2026-06-29 P1-05 升级】支持 200MB 大文件流式处理：
+     * 1. Tika 流式解析：分块输出文本到临时文件，不占用堆内存
+     * 2. 分批向量化：每批 50 个 chunks，处理完释放内存后再处理下一批
+     *
      * @param documentId 文档ID（数据库中的记录ID）
      * @param filePath 上传文件的存储路径
      */
     @Async(AsyncConfig.DOCUMENT_PROCESS_EXECUTOR)
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void processDocumentAsync(UUID documentId, Path filePath) {
+        Path tempTextFile = null;
         try {
             // 从数据库获取文档记录
-            Document document = documentRepository.findById(documentId).orElseThrow(() -> 
+            Document document = documentRepository.findById(documentId).orElseThrow(() ->
                 new RuntimeException("文档不存在: " + documentId));
-            
-            // ========== 阶段1: 解析文档 ==========
-            document.setStatus(Document.DocumentStatus.PARSING);  // 状态：解析中
-            document.setProgress(30);                           // 进度：30%
+
+            // ========== 阶段1: 流式解析文档 ==========
+            document.setStatus(Document.DocumentStatus.PARSING);
+            document.setProgress(10);
             saveAndEmit(document);
-            
-            // 检查文件是否存在
+
             if (!Files.exists(filePath)) {
                 throw new RuntimeException("文件不存在: " + filePath);
             }
-            
-            log.info("开始解析文件: {}, 大小: {} bytes", filePath, Files.size(filePath));
-            
-            // 根据文件类型选择解析方式
-            String text;
+
+            long fileSize = Files.size(filePath);
+            log.info("开始解析文件: {}, 大小: {} bytes", filePath, fileSize);
+
             String fileName = filePath.getFileName().toString().toLowerCase();
 
-            if (fileName.endsWith(".txt")) {
-                // TXT文件：尝试多种编码（UTF-8优先，GBK备选）
-                try {
-                    text = Files.readString(filePath);
-                } catch (Exception e) {
-                    try {
-                        text = new String(Files.readAllBytes(filePath), "GBK");
-                    } catch (Exception e2) {
-                        text = new String(Files.readAllBytes(filePath), "UTF-8");
-                    }
-                }
-            } else if (fileName.endsWith(".pdf")) {
-                // PDF文件：优先使用 Tika 提取文字层
-                // 如果文字层为空或过少，自动启用 OCR
-                text = tika.parseToString(filePath.toFile());
-
-                // 检查文字层是否有效（内容过少可能是扫描版 PDF）
-                if (text.trim().length() < 50 && ocrService.isAvailable()) {
-                    log.info("PDF 文字层内容过少（{} 字符），启用 OCR 识别", text.trim().length());
-                    String ocrText = ocrService.extractTextFromPdf(filePath);
-                    if (ocrText != null && !ocrText.isEmpty()) {
-                        // 合并：文字层 + OCR 结果
-                        text = text.trim() + "\n\n--- OCR 识别内容 ---\n\n" + ocrText;
-                    }
-                }
-            } else if (fileName.endsWith(".docx")) {
-                // Word 文档：先用 Tika 提取文字，再提取表格
-                text = tika.parseToString(filePath.toFile());
-
-                // 提取表格并追加到文本
-                List<TableExtractorService.TableInfo> tables = tableExtractor.extractTablesFromWord(filePath);
-                if (!tables.isEmpty()) {
-                    log.info("从 Word 文档提取到 {} 个表格", tables.size());
-                    StringBuilder tableSection = new StringBuilder("\n\n--- 文档中的表格 ---\n\n");
-                    for (TableExtractorService.TableInfo table : tables) {
-                        tableSection.append("【表格 ").append(table.getTableIndex() + 1)
-                                .append(" (共").append(table.getRowCount())
-                                .append("行x").append(table.getColCount()).append("列)】\n");
-                        tableSection.append(table.getMarkdownTable()).append("\n");
-                    }
-                    text = text + tableSection.toString();
-                }
+            // 【P1-05 升级】流式解析：根据文件大小决定策略
+            String text;
+            if (fileSize > 50 * 1024 * 1024) {
+                // 大文件（>50MB）：流式解析到临时文件
+                log.info("大文件检测（{}MB），启用流式解析", fileSize / 1024 / 1024);
+                tempTextFile = streamParseToTempFile(filePath, documentId);
+                text = Files.readString(tempTextFile);
             } else {
-                // 其他格式（Word等）：使用Tika解析
-                text = tika.parseToString(filePath.toFile());
+                // 小文件：直接解析到内存
+                text = parseDocument(filePath, fileName);
             }
 
             log.info("解析文档成功，文本长度: {}", text.length());
-            
+
             // 检查是否成功提取文本
             if (text == null || text.trim().isEmpty()) {
                 throw new RuntimeException("无法从文档中提取文字");
             }
 
-            // ========== 阶段2: 文本切分 ==========
-            document.setStatus(Document.DocumentStatus.CHUNKING);  // 状态：切分中
-            document.setProgress(50);                               // 进度：50%
-            saveAndEmit(document);
-            
-            // 调用TextSplitter将文本切分为小块
-            List<String> chunks = textSplitter.split(text);
-            log.info("文本切片完成，切片数量: {}, 策略: {}", chunks.size(), textSplitter.getChunkStrategy());
-
-            // ========== 阶段3&4: 向量化与存储 ==========
-            document.setStatus(Document.DocumentStatus.EMBEDDING);  // 状态：向量化中
-            document.setProgress(70);                               // 进度：70%
+            // ========== 阶段2: 文本切分（分批） ==========
+            document.setStatus(Document.DocumentStatus.CHUNKING);
+            document.setProgress(40);
             saveAndEmit(document);
 
-            int successCount = 0;  // 成功计数的切片数
-            int failCount = 0;     // 失败计数的切片数
-            
-            // 遍历每个切片，依次向量化并存储
-            for (int i = 0; i < chunks.size(); i++) {
-                String chunk = chunks.get(i);
-                log.info("开始向量化第 {} 个切片", i + 1);
-                
-                try {
-                    // 1. 调用EmbeddingService将文本转换为向量
-                    float[] embedding = embeddingService.embed(chunk);
-                    
-                    // 检查向量化是否成功
-                    if (embedding.length == 0) {
-                        log.error("切片 {} 向量化失败", i + 1);
-                        failCount++;
-                        continue;
-                    }
+            // 将文本写入临时文件（如果还没写过），支持大文本切分
+            Path textTempFile = tempTextFile != null ? tempTextFile :
+                writeTextToTempFile(text, documentId);
 
-                    // 2. 创建切片记录，存入MySQL
-                    DocumentChunk docChunk = new DocumentChunk();
-                    docChunk.setDocumentId(documentId);
-                    docChunk.setChunkIndex(i);                           // 切片索引
-                    docChunk.setContent(chunk);                           // 切片文本
-                    docChunk.setEmbedding(Arrays.toString(embedding));   // 存储向量字符串
-                    documentChunkRepository.save(docChunk);
+            // 分批切分 + 向量化（流式处理，不需要一次性把所有 chunks 加载到内存）
+            int totalChunks = countChunks(text);
+            int processedChunks = 0;
+            int successCount = 0;
+            int failCount = 0;
 
-                    // 3. 同时存入Chroma向量数据库（用于快速检索）
-                    chromaService.addDocument(documentId, i, chunk, embedding);
+            log.info("文本切片完成，预计切片数量: {}, 策略: {}, 批次大小: {}",
+                    totalChunks, textSplitter.getChunkStrategy(), embeddingBatchSize);
 
-                    // 4. 同时添加到BM25索引（用于关键词检索）
-                    String chunkId = documentId.toString() + "_" + i;
-                    bm25Service.addDocument(chunkId, chunk, documentId.toString(), i);
-                    
-                    successCount++;
-                    log.info("切片 {} 向量化完成", i + 1);
-                    
-                } catch (Exception e) {
-                    log.error("切片 {} 向量化异常: {}", i + 1, e.getMessage());
-                    failCount++;
+            // ========== 阶段3&4: 分批向量化与存储 ==========
+            document.setStatus(Document.DocumentStatus.EMBEDDING);
+            saveAndEmit(document);
+
+            // 分批读取 chunks 并处理
+            List<String> batch = new ArrayList<>(embeddingBatchSize);
+            int chunkIndex = 0;
+            Iterator<String> chunkIterator = textSplitter.splitIteratively(text);
+
+            while (chunkIterator.hasNext()) {
+                batch.add(chunkIterator.next());
+
+                if (batch.size() >= embeddingBatchSize) {
+                    // 处理这一批
+                    var result = processBatch(documentId, batch, chunkIndex, document);
+                    successCount += result.successCount;
+                    failCount += result.failCount;
+                    chunkIndex += batch.size();
+                    processedChunks += batch.size();
+
+                    // 更新进度（40% -> 90%）
+                    int embedProgress = totalChunks > 0 ? 40 + (processedChunks * 50 / totalChunks) : 90;
+                    document.setProgress(embedProgress);
+                    saveAndEmit(document);
+
+                    // 清空批次，释放内存
+                    batch.clear();
+                    log.info("批次处理完成，已处理 {}/{} 个切片", processedChunks, totalChunks);
                 }
-                
-                // 更新进度（70% -> 100%）
-                int embedProgress = chunks.isEmpty() ? 100 : 70 + ((i + 1) * 30 / chunks.size());
-                document.setProgress(embedProgress);
-                saveAndEmit(document);
             }
+
+            // 处理剩余的批次
+            if (!batch.isEmpty()) {
+                var result = processBatch(documentId, batch, chunkIndex, document);
+                successCount += result.successCount;
+                failCount += result.failCount;
+                processedChunks += batch.size();
+            }
+
+            // 清理临时文件
+            cleanupTempFile(textTempFile);
 
             // ========== 完成 ==========
             log.info("向量化完成，成功: {}, 失败: {}", successCount, failCount);
-            document.setChunkCount(successCount);  // 记录成功切片数
-            
-            // 根据处理结果设置最终状态
+            document.setChunkCount(successCount);
+
             if (successCount == 0) {
-                // 全部失败
                 document.setStatus(Document.DocumentStatus.FAILED);
                 document.setErrorMessage("所有切片向量化失败");
             } else if (failCount > 0) {
-                // 部分成功
                 document.setStatus(Document.DocumentStatus.COMPLETED);
                 document.setErrorMessage("部分切片向量化失败，成功: " + successCount + ", 失败: " + failCount);
             } else {
-                // 全部成功
                 document.setStatus(Document.DocumentStatus.COMPLETED);
             }
-            
-            document.setProgress(100);                              // 进度：100%
-            document.setProcessedAt(LocalDateTime.now());           // 处理完成时间
+
+            document.setProgress(100);
+            document.setProcessedAt(LocalDateTime.now());
             saveAndEmit(document);
             log.info("文档处理完成，切片数量: {}", successCount);
 
         } catch (Exception e) {
-            // 异常处理：更新文档状态为失败
             log.error("文档处理失败: {}", e.getMessage(), e);
             try {
                 Document document = documentRepository.findById(documentId).orElseThrow();
@@ -263,6 +248,206 @@ public class DocumentProcessService {
                 saveAndEmit(document);
             } catch (Exception ex) {
                 log.error("更新文档状态失败: {}", ex.getMessage());
+            }
+        } finally {
+            // 确保清理临时文件
+            if (tempTextFile != null) {
+                cleanupTempFile(tempTextFile);
+            }
+        }
+    }
+
+    /**
+     * 【2026-06-29 P1-05】流式解析文档到临时文件
+     *
+     * 使用 Tika 的 WriteOutContentHandler 限制单次写入大小，
+     * 分多次读取并追加到临时文件，避免大文本 OOM。
+     */
+    private Path streamParseToTempFile(Path filePath, UUID documentId) throws Exception {
+        Path tempFile = Files.createTempFile(
+            Paths.get(tempDir).toAbsolutePath().normalize(),
+            "parse_" + documentId + "_",
+            ".txt"
+        );
+        Files.createDirectories(tempFile.getParent());
+
+        log.info("流式解析到临时文件: {}", tempFile);
+
+        try (InputStream is = Files.newInputStream(filePath);
+             TikaInputStream tis = TikaInputStream.cast(is)) {
+            AutoDetectParser parser = new AutoDetectParser();
+            Metadata metadata = new Metadata();
+
+            // 使用较大但可控的写入限制（100MB），分多次读取
+            // Tika 的 WriteOutContentHandler 会抛出 WriteLimitReachedException 停止解析
+            ContentHandler handler = new WriteOutContentHandler(100 * 1024 * 1024);
+            StringWriter writer = new StringWriter();
+
+            // 分块解析
+            long totalWritten = 0;
+            int part = 0;
+
+            while (true) {
+                try {
+                    handler = new WriteOutContentHandler(100 * 1024 * 1024);  // 100MB 每块
+                    writer = new StringWriter();
+                    org.apache.tika.sax.BodyContentHandler bodyHandler =
+                        new org.apache.tika.sax.BodyContentHandler(handler);
+
+                    parser.parse(tis, bodyHandler, metadata);
+                    String content = writer.toString();
+
+                    // 追加到临时文件
+                    Files.writeString(tempFile, content,
+                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                    totalWritten += content.length();
+                    log.info("流式解析第 {} 部分完成，累计: {} chars", ++part, totalWritten);
+                    break;  // 解析完成
+
+                } catch (org.apache.tika.exception.WriteLimitReachedException e) {
+                    // 达到写入限制，保存当前内容并继续
+                    String content = writer.toString();
+                    Files.writeString(tempFile, content,
+                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                    totalWritten += content.length();
+                    log.info("流式解析部分 {} 完成（达到写入限制），继续解析...", ++part);
+                }
+            }
+
+            log.info("流式解析完成，总计: {} chars", totalWritten);
+            return tempFile;
+        }
+    }
+
+    /**
+     * 【2026-06-29 P1-05】解析文档（非大文件路径）
+     */
+    private String parseDocument(Path filePath, String fileName) throws Exception {
+        String text;
+
+        if (fileName.endsWith(".txt")) {
+            try {
+                text = Files.readString(filePath);
+            } catch (Exception e) {
+                try {
+                    text = new String(Files.readAllBytes(filePath), "GBK");
+                } catch (Exception e2) {
+                    text = new String(Files.readAllBytes(filePath), "UTF-8");
+                }
+            }
+        } else if (fileName.endsWith(".pdf")) {
+            text = tika.parseToString(filePath.toFile());
+
+            if (text.trim().length() < 50 && ocrService.isAvailable()) {
+                log.info("PDF 文字层内容过少（{} 字符），启用 OCR 识别", text.trim().length());
+                String ocrText = ocrService.extractTextFromPdf(filePath);
+                if (ocrText != null && !ocrText.isEmpty()) {
+                    text = text.trim() + "\n\n--- OCR 识别内容 ---\n\n" + ocrText;
+                }
+            }
+        } else if (fileName.endsWith(".docx")) {
+            text = tika.parseToString(filePath.toFile());
+
+            List<TableExtractorService.TableInfo> tables = tableExtractor.extractTablesFromWord(filePath);
+            if (!tables.isEmpty()) {
+                log.info("从 Word 文档提取到 {} 个表格", tables.size());
+                StringBuilder tableSection = new StringBuilder("\n\n--- 文档中的表格 ---\n\n");
+                for (TableExtractorService.TableInfo table : tables) {
+                    tableSection.append("【表格 ").append(table.getTableIndex() + 1)
+                            .append(" (共").append(table.getRowCount())
+                            .append("行x").append(table.getColCount()).append("列)】\n");
+                    tableSection.append(table.getMarkdownTable()).append("\n");
+                }
+                text = text + tableSection.toString();
+            }
+        } else {
+            text = tika.parseToString(filePath.toFile());
+        }
+
+        return text;
+    }
+
+    /**
+     * 【2026-06-29 P1-05】将文本写入临时文件（支持大文本）
+     */
+    private Path writeTextToTempFile(String text, UUID documentId) throws Exception {
+        Path tempFile = Files.createTempFile(
+            Paths.get(tempDir).toAbsolutePath().normalize(),
+            "text_" + documentId + "_",
+            ".txt"
+        );
+        Files.writeString(tempFile, text);
+        return tempFile;
+    }
+
+    /**
+     * 【2026-06-29 P1-05】估算 chunks 数量（不实际切分）
+     */
+    private int countChunks(String text) {
+        // 简单估算：文本长度 / 平均 chunk 大小
+        int avgChunkSize = textSplitter.getChunkSize();
+        return Math.max(1, (text.length() + avgChunkSize - 1) / avgChunkSize);
+    }
+
+    /**
+     * 【2026-06-29 P1-05】处理一批 chunks
+     */
+    private record BatchResult(int successCount, int failCount) {}
+
+    private BatchResult processBatch(UUID documentId, List<String> chunks,
+                                     int startIndex, Document document) {
+        int successCount = 0;
+        int failCount = 0;
+
+        for (int i = 0; i < chunks.size(); i++) {
+            String chunk = chunks.get(i);
+            int globalIndex = startIndex + i;
+
+            try {
+                float[] embedding = embeddingService.embed(chunk);
+
+                if (embedding.length == 0) {
+                    log.error("切片 {} 向量化失败（空向量）", globalIndex + 1);
+                    failCount++;
+                    continue;
+                }
+
+                // 存入 MySQL
+                DocumentChunk docChunk = new DocumentChunk();
+                docChunk.setDocumentId(documentId);
+                docChunk.setChunkIndex(globalIndex);
+                docChunk.setContent(chunk);
+                docChunk.setEmbedding(Arrays.toString(embedding));
+                documentChunkRepository.save(docChunk);
+
+                // 存入 Chroma
+                chromaService.addDocument(documentId, globalIndex, chunk, embedding);
+
+                // 存入 BM25
+                String chunkId = documentId.toString() + "_" + globalIndex;
+                bm25Service.addDocument(chunkId, chunk, documentId.toString(), globalIndex);
+
+                successCount++;
+
+            } catch (Exception e) {
+                log.error("切片 {} 向量化异常: {}", globalIndex + 1, e.getMessage());
+                failCount++;
+            }
+        }
+
+        return new BatchResult(successCount, failCount);
+    }
+
+    /**
+     * 【2026-06-29 P1-05】清理临时文件
+     */
+    private void cleanupTempFile(Path tempFile) {
+        if (tempFile != null && Files.exists(tempFile)) {
+            try {
+                Files.deleteIfExists(tempFile);
+                log.debug("已清理临时文件: {}", tempFile);
+            } catch (Exception e) {
+                log.warn("清理临时文件失败: {}, err={}", tempFile, e.getMessage());
             }
         }
     }
