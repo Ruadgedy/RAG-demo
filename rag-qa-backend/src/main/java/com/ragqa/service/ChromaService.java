@@ -232,9 +232,34 @@ public class ChromaService {
 
     /**
      * 相似度检索
-     * 
-     * 根据用户问题，从向量数据库中检索最相似的文档切片
-     * 使用EmbeddingService生成查询向量，然后调用Chroma API进行检索
+     *
+     * 根据用户问题，从向量数据库中检索最相似的文档切片。
+     *
+     * 【2026-06-29 增量 P1-01】距离计算改用余弦相似度
+     *
+     * 背景：
+     *   Chroma collection 默认 space=l2（平方欧氏距离），但 qwen3-embedding:4b
+     *   这类现代 embedding 模型训练时按 cosine 优化。直接用 L2 距离会同时受
+     *   向量"方向"和"模长"影响，导致两个语义一致但长度不同的文档被错位排名。
+     *
+     * 解决方案（无需重建 collection、零停机）：
+     *   1. query 字段增加 "embeddings" —— 让 Chroma 把候选的存储向量也返回
+     *   2. 在 Java 端用 cosineSimilarity(queryVec, storedVec) 重算分数
+     *   3. 用 cosine 作为最终 score 返回给上游（RagService / HybridSearchService）
+     *
+     * 为什么 Chroma 的 L2 排名还能给出"差不多对"的 top-K？
+     *   因为训练良好的 embedding 模型输出的向量模长分布集中（多数接近 1），
+     *   L2 距离虽然不是最优但排名顺序与 cosine 高度相关。这次改动只是把
+     *   "差不多对" 升级成 "完全对"。
+     *
+     * 兼容性 / 回滚：
+     *   - 老逻辑 score = 1.0 / (1.0 + distance) 仍然有效，只是排序精度低
+     *   - 如需回滚，把 include 改回 ["documents", "metadatas", "distances"]，
+     *     并把 score 计算改回 sigmoid 形式即可
+     *
+     * @param query 用户问题
+     * @param topK  返回前 K 个最相似结果
+     * @return SearchResult 列表，score 字段为余弦相似度（范围 [-1, 1]，越接近 1 越相似）
      */
     public List<SearchResult> similaritySearch(String query, int topK) {
         try {
@@ -246,12 +271,14 @@ public class ChromaService {
             }
 
             String collectionId = getOrCreateCollectionId();
-            String endpoint = "/api/v2/tenants/" + tenantName + "/databases/" + databaseName + "/collections/" + collectionId + "/query";
+            String endpoint = "/api/v2/tenants/" + tenantName + "/databases/" + databaseName
+                    + "/collections/" + collectionId + "/query";
 
             Map<String, Object> requestBody = new LinkedHashMap<>();
             requestBody.put("query_embeddings", List.of(queryEmbedding));
             requestBody.put("n_results", topK);
-            requestBody.put("include", List.of("documents", "metadatas", "distances"));
+            // 关键：include 必须含 "embeddings"，否则后续 cosine 计算拿不到存储向量
+            requestBody.put("include", List.of("documents", "metadatas", "distances", "embeddings"));
 
             String jsonBody = objectMapper.writeValueAsString(requestBody);
             String response = postToChroma(endpoint, jsonBody);
@@ -264,18 +291,34 @@ public class ChromaService {
                 JsonNode documents = root.get("documents").get(0);
                 JsonNode metadatas = root.get("metadatas").get(0);
                 JsonNode distances = root.get("distances").get(0);
+                // 候选向量数组，可能为 null（老版本 Chroma 不支持 include embeddings）
+                JsonNode embeddings = root.has("embeddings") ? root.get("embeddings").get(0) : null;
 
                 for (int i = 0; i < ids.size(); i++) {
                     String document = documents.get(i).asText();
                     String documentId = metadatas.get(i).has("documentId")
-                        ? metadatas.get(i).get("documentId").asText() : "";
+                            ? metadatas.get(i).get("documentId").asText() : "";
                     String chunkIndex = metadatas.get(i).has("chunkIndex")
-                        ? metadatas.get(i).get("chunkIndex").asText() : "0";
-                    double distance = distances.get(i).asDouble();
-                    double score = 1.0 / (1.0 + distance);
+                            ? metadatas.get(i).get("chunkIndex").asText() : "0";
+
+                    // 距离 + 相似度双轨：cosine 优先，回退到 L2 sigmoid
+                    double score;
+                    if (embeddings != null && embeddings.isArray() && embeddings.size() > i) {
+                        float[] storedVec = parseEmbeddingArray(embeddings.get(i));
+                        score = cosineSimilarity(queryEmbedding, storedVec);
+                    } else {
+                        // 兜底：Chroma 不返回向量时退化为 L2 sigmoid
+                        // 这样即使升级 Chroma 后 include 字段不被支持也不会崩
+                        double distance = distances.get(i).asDouble();
+                        score = 1.0 / (1.0 + distance);
+                        log.debug("Chroma 未返回 embedding，使用 L2 sigmoid 兜底 score={}", score);
+                    }
 
                     results.add(new SearchResult(document, documentId, chunkIndex, score));
                 }
+
+                // 按 cosine 分数降序排（Chroma 返回顺序是按距离升序，现在按相似度降序）
+                results.sort((a, b) -> Double.compare(b.score(), a.score()));
             }
 
             return results;
@@ -284,6 +327,79 @@ public class ChromaService {
             log.error("Chroma检索异常: {}", e.getMessage());
             return Collections.emptyList();
         }
+    }
+
+    /**
+     * 解析 Chroma 返回的向量数组（JSON array of numbers → float[]）
+     *
+     * Chroma REST v2 的 embeddings 字段格式：
+     *   [[0.1, 0.2, ...], [0.3, 0.4, ...], ...]
+     *
+     * @param node 单个文档的 embedding 数组节点
+     * @return float[]，解析失败返回空数组（不抛异常）
+     */
+    private float[] parseEmbeddingArray(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return new float[0];
+        }
+        float[] result = new float[node.size()];
+        for (int i = 0; i < node.size(); i++) {
+            JsonNode v = node.get(i);
+            // 兼容 INT / FLOAT / DOUBLE 三种 JSON 数字类型
+            if (v.isNumber()) {
+                result[i] = (float) v.asDouble();
+            } else {
+                log.warn("embedding[{}] 不是数字类型: {}", i, v.getNodeType());
+                return new float[0];
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 余弦相似度计算（cosine similarity）
+     *
+     * 公式：cos(A, B) = (A · B) / (||A|| × ||B||)
+     *
+     * 取值范围 [-1, 1]：
+     *   - 1.0  完全相同方向（最相似）
+     *   - 0.0  正交（无相关性）
+     *   - -1.0 完全相反方向（最不相似）
+     *
+     * 【2026-06-29 增量 P1-01】用于替换 Chroma 默认 L2 距离下的 score 计算。
+     *
+     * 与 RagService.cosineSimilarity 的区别：
+     *   - 这里用于实时检索（O(1) 候选 × 向量维度）
+     *   - RagService 那个用于 fallback 检索（遍历数据库里所有 chunk）
+     *   - 数学等价，独立维护避免跨包耦合
+     *
+     * @param a 查询向量（embeddingService 生成）
+     * @param b 存储向量（Chroma 返回）
+     * @return cosine 值；维度不一致 / 零向量返回 0（不抛异常）
+     */
+    private double cosineSimilarity(float[] a, float[] b) {
+        // 维度不一致 → 不可比
+        if (a == null || b == null || a.length != b.length || a.length == 0) {
+            return 0.0;
+        }
+
+        double dotProduct = 0.0;  // A · B
+        double normA = 0.0;       // ||A||²
+        double normB = 0.0;       // ||B||²
+
+        // 单次循环同时算点积和两个模长的平方，避免三次遍历
+        for (int i = 0; i < a.length; i++) {
+            dotProduct += a[i] * b[i];
+            normA += a[i] * a[i];
+            normB += b[i] * b[i];
+        }
+
+        // 零向量保护：||A||=0 或 ||B||=0 时余弦无定义，返回 0 表示"无相似度"
+        if (normA == 0.0 || normB == 0.0) {
+            return 0.0;
+        }
+
+        return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
     }
 
     /**

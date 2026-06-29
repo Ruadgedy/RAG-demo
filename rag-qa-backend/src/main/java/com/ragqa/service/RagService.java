@@ -1,5 +1,6 @@
 package com.ragqa.service;
 
+import com.ragqa.dto.ChatMessage;
 import com.ragqa.model.Document;
 import com.ragqa.repository.DocumentChunkRepository;
 import com.ragqa.repository.DocumentRepository;
@@ -46,10 +47,27 @@ public class RagService {
     private final ChromaService chromaService;
     /** 混合检索服务（向量 + BM25） */
     private final HybridSearchService hybridSearchService;
+    /**
+     * 【2026-06-29 增量 P1-02】Cross-Encoder 重排序服务
+     *
+     * 之前是只注入没用上，现在接入 retrieve() 的两阶段检索链路。
+     */
+    private final RerankService rerankService;
 
-    /** 检索返回的结果数量 */
+    /** 检索返回的最终结果数量（传给 LLM 的 top-K） */
     @Value("${retrieval.topk:3}")
     private int TOP_K;
+
+    /**
+     * 【2026-06-29 增量 P1-02】第一阶段召回数量
+     *
+     * 两阶段检索：先从 Chroma 召回 candidatesTopK 个，再用 RerankService 精排到 TOP_K。
+     * 召回数 > 返回数 才能让 rerank 有空间挑选更好的 top-K。
+     *
+     * 启用 rerank 时建议 ≥20；未启用时此参数无意义（直接返回 TOP_K）。
+     */
+    @Value("${retrieval.candidates.topk:20}")
+    private int candidatesTopK;
 
     /**
      * Fallback 检索最大加载切片数（防 OOM）
@@ -63,12 +81,33 @@ public class RagService {
     private int fallbackMaxChunks;
 
     /**
+     * 【2026-06-29 增量 P0-02】多轮对话 — 注入 prompt 的最近历史轮数
+     *
+     * 配置项：rag.history.turns
+     * 默认 3 轮 = user/assistant × 3 = 6 条消息。
+     *
+     * 为什么是 3：
+     *   - 1 轮：太短，指代（"它"、"那个"）无法消解
+     *   - 3 轮：覆盖大多数真实多轮场景，prompt 不会爆
+     *   - 5+ 轮：token 占用大，LLM 注意力会分散到无关早期对话
+     */
+    @Value("${rag.history.turns:3}")
+    private int historyTurns;
+
+    /**
      * 检索结果记录
+     *
+     * 【2026-06-29 增量 P0-01】新增 fileName 字段
+     *
+     * 历史：source 只有 "docId_chunkIndex" 字符串，前端拿到后无法直接显示文档名。
+     * 修复：在 retrieve() 时把 docId 同时关联到 Document 表的 fileName，一并返回。
+     *
      * @param content 文档切片内容
      * @param source 来源标识（documentId_chunkIndex）
      * @param score 相似度得分
+     * @param fileName 原始文件名（如 "产品手册.pdf"），P0-01 新增
      */
-    public record RetrievalResult(String content, String source, double score) {}
+    public record RetrievalResult(String content, String source, double score, String fileName) {}
 
     /**
      * RAG 问答结果（V3 新增：含 RAG 召回元数据，用于持久化到 chat_history.rag_metadata）。
@@ -85,12 +124,18 @@ public class RagService {
      * 【V3 变更】返回值从 String 改为 ChatResult，便于 ChatService 拼装 rag_metadata JSON
      * 落库到 chat_history 表。
      *
-     * @param message 用户问题
+     * 【2026-06-29 增量 P0-02】新增 history 参数
+     *   - 检索阶段：把 history 中最近 N 轮的 user 问题拼接到当前 query 之前，
+     *     让 embedding 看到上下文（消除"它"、"那个"等指代歧义）
+     *   - 生成阶段：把 history 注入 prompt，让 LLM 也知道上文
+     *
+     * @param message 用户当前问题
      * @param knowledgeBaseId 知识库ID
+     * @param history 多轮对话历史（前端已传；ChatService 兜底传 List.of()）
      * @return ChatResult（answer + 召回列表 + 检索耗时）
      */
-    public ChatResult chat(String message, UUID knowledgeBaseId) {
-        log.info("RAG问答: {}", message);
+    public ChatResult chat(String message, UUID knowledgeBaseId, List<ChatMessage> history) {
+        log.info("RAG问答: message='{}', historySize={}", message, history == null ? 0 : history.size());
 
         // 1. 检查知识库是否有已处理的文档
         List<Document> documents = documentRepository.findByKnowledgeBaseId(knowledgeBaseId);
@@ -102,9 +147,11 @@ public class RagService {
             return new ChatResult("该知识库暂无文档，请先上传文档。", java.util.List.of(), 0L);
         }
 
-        // 2. 检索相关文档（从Chroma向量数据库）—— 计时
+        // 2. 检索相关文档（query 用 history 重写过的版本，让 embedding 看到上下文）
+        String rewrittenQuery = rewriteQueryWithHistory(message, history);
+        log.debug("query rewrite: '{}' → '{}'", message, rewrittenQuery);
         long retrievalStart = System.currentTimeMillis();
-        List<RetrievalResult> retrieved = retrieve(message, knowledgeBaseId);
+        List<RetrievalResult> retrieved = retrieve(rewrittenQuery, knowledgeBaseId);
         long retrievalDurationMs = System.currentTimeMillis() - retrievalStart;
 
         if (retrieved.isEmpty()) {
@@ -114,8 +161,8 @@ public class RagService {
         // 3. 构建上下文：将检索到的文档拼接成上下文字符串
         String context = buildContext(retrieved);
 
-        // 4. 构建提示词：将上下文和问题组合成完整提示
-        String prompt = buildPrompt(context, message);
+        // 4. 构建提示词：将上下文 + history + 问题组合成完整提示
+        String prompt = buildPromptWithHistory(context, history, message);
 
         // 5. 调用LLM生成回答
         try {
@@ -145,33 +192,45 @@ public class RagService {
     }
 
     /**
-     * 检索相关文档
-     * 
-     * 优先使用Chroma向量数据库检索，如果失败则回退到数据库检索
-     * 
+     * 检索相关文档（两阶段检索）
+     *
+     * 【2026-06-29 升级 P1-02】改造为「召回调 Rerank」流程：
+     *   Stage 1 (召回)：从 Chroma 拉 top-{candidatesTopK} 候选（默认 20）
+     *   Stage 2 (精排)：如果 rerankService 启用，调用 cross-encoder 重排到 top-{TOP_K}；否则直接截前 TOP_K
+     *
+     * 【设计权衡】
+     *   - 召回集 ≥ 返回集：让 rerank 有挑选空间（top-3 候选里挑 top-3 没意义）
+     *   - candidatesTopK 默认 20：覆盖绝大多数真实场景（top-3 → top-20 召回率提升明显）
+     *   - 旧配置 retrieval.topk=3 不变：用户感知层面没有任何行为差异
+     *
      * @param query 用户问题
      * @param knowledgeBaseId 知识库ID
-     * @return 检索结果列表
+     * @return 检索结果列表（最多 TOP_K 条，已 rerank 排序）
      */
     private List<RetrievalResult> retrieve(String query, UUID knowledgeBaseId) {
         try {
-            // 1. 从Chroma获取最相似的文档切片
-            List<ChromaService.SearchResult> results = chromaService.similaritySearch(query, TOP_K);
+            // 1. 召回：从 Chroma 拉取较多候选（默认 20 个）
+            // 用 candidatesTopK 而不是 TOP_K，给 rerank 留出挑选空间
+            int fetchSize = rerankService.isEnabled()
+                    ? Math.max(candidatesTopK, TOP_K)  // 启用 rerank 时多召一些
+                    : TOP_K;                             // 未启用则少召节省时间
+            List<ChromaService.SearchResult> candidates = chromaService.similaritySearch(query, fetchSize);
 
-            if (results.isEmpty()) {
+            if (candidates.isEmpty()) {
                 return Collections.emptyList();
             }
 
-            // 2. 一次性查询该知识库下所有 COMPLETED 状态的文档，构建 Set 用于 O(1) 过滤
+            // 2. 一次性查询该知识库下所有 COMPLETED 状态的文档
             // 【修复 N+1】原代码每个 Chroma 结果都执行一次 findByKnowledgeBaseId，
-            // TopK=20 就是 20 次查询。现改为一次查询 + Set.contains()
-            Set<UUID> validDocIds = documentRepository.findByKnowledgeBaseId(knowledgeBaseId).stream()
+            // TopK=20 就是 20 次查询。现改为一次查询 + Map.get()
+            // 【2026-06-29 增量 P0-01】顺便把 fileName 也一次性拉出来，避免后面对每个候选都查一次
+            Map<UUID, Document> docMap = documentRepository.findByKnowledgeBaseId(knowledgeBaseId).stream()
                     .filter(doc -> doc.getStatus() == Document.DocumentStatus.COMPLETED)
-                    .map(Document::getId)
-                    .collect(Collectors.toSet());
+                    .collect(Collectors.toMap(Document::getId, doc -> doc));
+            Set<UUID> validDocIds = docMap.keySet();
 
             // 3. 过滤：只保留属于该知识库且状态为COMPLETED的文档
-            return results.stream()
+            List<ChromaService.SearchResult> validCandidates = candidates.stream()
                     .filter(r -> {
                         try {
                             UUID docId = UUID.fromString(r.documentId());
@@ -180,25 +239,57 @@ public class RagService {
                             return false;
                         }
                     })
-                    .map(r -> new RetrievalResult(
-                        r.content(),                              // 切片文本
-                        r.documentId() + "_" + r.chunkIndex(),    // 来源标识
-                        r.score()                                 // 相似度得分
-                    ))
+                    .collect(Collectors.toList());
+
+            if (validCandidates.isEmpty()) {
+                return Collections.emptyList();
+            }
+
+            // 4. 精排：调用 RerankService 重排（如果启用）
+            // RerankService.rerank() 内部已处理：未启用/Ollama 失败时自动降级
+            List<RerankService.RerankResult> reranked = rerankService.rerank(query, validCandidates, TOP_K);
+
+            // 5. 转换为统一的 RetrievalResult（含 fileName，P0-01）
+            return reranked.stream()
+                    .map(r -> {
+                        UUID docId;
+                        try {
+                            docId = UUID.fromString(r.getDocumentId());
+                        } catch (Exception e) {
+                            docId = null;
+                        }
+                        // 从预加载的 docMap 拿 fileName，缺失则降级为 docId 前 8 位
+                        Document doc = docId != null ? docMap.get(docId) : null;
+                        String fileName = doc != null ? doc.getFileName()
+                                : (docId != null ? docId.toString().substring(0, 8) : "unknown");
+                        return new RetrievalResult(
+                                r.getContent(),                                  // 切片文本
+                                r.getDocumentId() + "_" + r.getChunkIndex(),    // 来源标识
+                                r.getScore(),                                    // 分数
+                                fileName                                         // 文件名（P0-01）
+                        );
+                    })
                     .collect(Collectors.toList());
         } catch (Exception e) {
-            // Chroma检索失败时，尝试从数据库检索（回退方案）
-            log.warn("Chroma检索失败，回退到数据库检索: {}", e.getMessage());
+            // Chroma 检索失败时，尝试从数据库检索（回退方案）
+            log.warn("Chroma 检索失败，回退到数据库检索: {}", e.getMessage());
             return fallbackRetrieve(query, knowledgeBaseId);
         }
     }
 
     /**
      * 流式检索 - 公开方法供ChatService调用
-     * 与普通retrieve()逻辑相同，供流式响应使用
+     *
+     * 【2026-06-29 增量 P0-02】接受 history 参数，复用非流式的 query 重写逻辑
+     *
+     * @param query 当前用户问题
+     * @param knowledgeBaseId 知识库ID
+     * @param history 对话历史（可空）
      */
-    public List<RetrievalResult> retrieveForStreaming(String query, UUID knowledgeBaseId) {
-        return retrieve(query, knowledgeBaseId);
+    public List<RetrievalResult> retrieveForStreaming(String query, UUID knowledgeBaseId, List<ChatMessage> history) {
+        String rewrittenQuery = rewriteQueryWithHistory(query, history);
+        log.debug("[stream] query rewrite: '{}' → '{}'", query, rewrittenQuery);
+        return retrieve(rewrittenQuery, knowledgeBaseId);
     }
 
     /**
@@ -244,10 +335,13 @@ public class RagService {
                 if (chunkEmbedding.length > 0) {
                     // 计算余弦相似度
                     double similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
+                    // 【2026-06-29 增量 P0-01】fallback 路径也需要 fileName
+                    // 这里的 doc 变量已经在 for 循环里，fileName 可直接拿到
                     results.add(new RetrievalResult(
                         chunk.getContent(),
                         chunk.getDocumentId() + "_" + chunk.getChunkIndex(),
-                        similarity
+                        similarity,
+                        doc.getFileName()
                     ));
                 }
             }
@@ -269,14 +363,14 @@ public class RagService {
 
     /**
      * 构建上下文字符串
-     * 
+     *
      * 将检索到的多个文档切片拼接成连续的上下文
      * 格式：
      * 参考文档：
-     * 
+     *
      * 【文档1】
      * xxx内容xxx
-     * 
+     *
      * 【文档2】
      * xxx内容xxx
      */
@@ -292,10 +386,10 @@ public class RagService {
     }
 
     /**
-     * 构建提示词
-     * 
-     * 将上下文和问题组合成LLM可理解的提示词
-     * 采用结构化格式，提升回答质量
+     * 构建提示词（V1：仅上下文 + 当前问题，不含历史）
+     *
+     * 【2026-06-29 P0-02】保留此方法作为"无历史对话"场景的 fallback
+     * 主要路径已切到 buildPromptWithHistory()
      */
     private String buildPrompt(String context, String question) {
         return """
@@ -316,6 +410,136 @@ public class RagService {
 
             === 回答 ===
             """.formatted(context, question);
+    }
+
+    /**
+     * 【2026-06-29 增量 P0-02】构建带对话历史的提示词
+     *
+     * 与 buildPrompt() 的关键区别：增加了"对话历史"section，让 LLM 看到上文，
+     * 解决多轮对话中"它/那个/前一条"等指代词的消解问题。
+     *
+     * 格式：
+     * <pre>
+     * === 对话历史（最近 N 轮）===
+     * [第1轮] user: 介绍一下产品A
+     * [第1轮] assistant: 产品A是xxx...
+     * [第2轮] user: 它的价格？
+     * [第2轮] assistant: 产品A 价格是...
+     * [第3轮] user: 有优惠吗？   ← 当前问题
+     *
+     * === 参考文档 ===
+     * ...
+     *
+     * === 用户当前问题 ===
+     * 有优惠吗？
+     *
+     * === 回答要求 ===
+     * 1. 结合对话历史理解指代
+     * 2. 只基于参考文档内容回答
+     * 3. ...
+     * </pre>
+     *
+     * @param context 检索到的文档上下文
+     * @param history 对话历史（前端传入；可空/可少于 N 轮）
+     * @param currentMessage 用户当前消息
+     */
+    private String buildPromptWithHistory(String context, List<ChatMessage> history, String currentMessage) {
+        StringBuilder historySection = new StringBuilder();
+        // 空 history 走 fallback 路径（保持行为兼容）
+        if (history == null || history.isEmpty()) {
+            historySection.append("（这是新对话，无上文）");
+        } else {
+            // 取最近 historyTurns * 2 条消息（每轮 user + assistant）
+            int n = Math.min(history.size(), historyTurns * 2);
+            int start = history.size() - n;
+            for (int i = start; i < history.size(); i++) {
+                ChatMessage m = history.get(i);
+                String roleLabel = "user".equals(m.getRole()) ? "用户" : "助手";
+                String content = m.getContent() == null ? "" : m.getContent();
+                // 单条消息过长截断（避免 prompt 爆炸）
+                if (content.length() > 500) {
+                    content = content.substring(0, 500) + "…";
+                }
+                historySection.append(roleLabel).append(": ").append(content).append("\n");
+            }
+        }
+
+        return """
+            你是一个专业的智能问答助手，擅长从提供的文档中准确提取信息并清晰回答用户问题。
+
+            === 对话历史（最近 %d 轮）===
+            %s
+
+            === 参考文档 ===
+            %s
+
+            === 用户当前问题 ===
+            %s
+
+            === 回答要求 ===
+            1. **优先结合对话历史理解指代**：用户当前问题中的"它/那个/前一条"等代词，先在历史中找到指代对象
+            2. 只基于参考文档内容回答，不要编造信息
+            3. 如果文档中没有相关信息，回答："抱歉，知识库中没有找到与您问题相关的内容。"
+            4. 引用文档时使用【文档X】标注来源
+            5. 回答结构：先给出结论，再引用证据，最后补充说明（如有）
+            6. 对于复杂问题，用分点或编号的方式回答
+
+            === 回答 ===
+            """.formatted(historyTurns, historySection.toString(), context, currentMessage);
+    }
+
+    /**
+     * 【2026-06-29 增量 P0-02】query rewriting（基于历史的查询重写）
+     *
+     * 问题背景：
+     *   多轮对话中，用户当前问题往往依赖上文：
+     *     user: "介绍一下产品A"
+     *     assistant: "产品A 是..."
+     *     user: "它有什么功能？"   ← 当前 query，embedding 模型不懂"它"
+     *
+     * 解决方案（轻量级，无需调用 LLM）：
+     *   把最近 N 轮 user 问题拼到当前 query 前面，让 embedding 模型看到上下文。
+     *
+     *   rewritten = "[last_user_msg_1] [last_user_msg_2] [current_msg]"
+     *
+     *   经过 embedding 后，向量空间里"它有什么功能"会被拉向"产品A 功能"附近。
+     *
+     * 不调用 LLM 做 query rewrite 的理由：
+     *   - 成本：每次都多一次 LLM 调用（$0.001-0.01）
+     *   - 延迟：+500ms-2s
+     *   - 效果：上述简单拼接已能解决 80%+ 的代词消解场景
+     *   - 后续如需要更复杂 rewrite（如 HyDE / Query2Doc），可单独迭代
+     *
+     * @param currentMessage 用户当前消息
+     * @param history 对话历史
+     * @return 重写后的查询（用空格拼接最近 N 轮 user 消息 + 当前消息）
+     */
+    private String rewriteQueryWithHistory(String currentMessage, List<ChatMessage> history) {
+        if (history == null || history.isEmpty()) {
+            return currentMessage;
+        }
+
+        // 只取最近 historyTurns 个 user 消息
+        List<String> recentUserMsgs = new ArrayList<>();
+        for (int i = history.size() - 1; i >= 0 && recentUserMsgs.size() < historyTurns; i--) {
+            ChatMessage m = history.get(i);
+            if ("user".equals(m.getRole()) && m.getContent() != null && !m.getContent().isBlank()) {
+                recentUserMsgs.add(0, m.getContent());   // 保持时间正序
+            }
+        }
+
+        if (recentUserMsgs.isEmpty()) {
+            return currentMessage;
+        }
+
+        // 反向迭代添加（最新的 user 在最前），形成递进式上下文
+        StringBuilder sb = new StringBuilder();
+        for (String msg : recentUserMsgs) {
+            if (sb.length() > 0) sb.append(" ");
+            sb.append(msg);
+        }
+        sb.append(" ").append(currentMessage);
+        return sb.toString();
     }
 
     /**

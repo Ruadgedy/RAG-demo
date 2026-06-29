@@ -19,6 +19,14 @@ public interface DocumentRepository extends JpaRepository<Document, UUID> {
     Optional<Document> findByKnowledgeBaseIdAndFileName(UUID knowledgeBaseId, String fileName);
 
     /**
+     * 【2026-06-29 增量 P1-04】按文件内容 SHA-256 查找
+     *
+     * 用于内容级去重：即使文件名不同，相同内容也算重复。
+     * 数据库层 uk_document_kb_file_hash 唯一约束保证并发安全。
+     */
+    Optional<Document> findByKnowledgeBaseIdAndFileHash(UUID knowledgeBaseId, String fileHash);
+
+    /**
      * 查找卡死的文档：状态在 PROCESSING_STATES 集合内，且 uploaded_at 早于 threshold。
      *
      * 用于 DocumentProcessRecoveryScheduler 定期清理因服务崩溃而永远卡在中间态的文档。

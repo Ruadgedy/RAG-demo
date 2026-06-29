@@ -13,6 +13,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 
@@ -57,7 +58,8 @@ public class ChatController {
         return ResponseEntity.ok(response);
     }
 
-    @Operation(summary = "问答（流式）", description = "基于知识库内容进行问答，通过 SSE 实时推送回答片段")
+    @Operation(summary = "问答（流式）", description = "基于知识库内容进行问答，通过 SSE 实时推送回答片段。"
+            + "事件类型：session-start（首条，data=sessionId）/ chunk（文本片段）/ sources（P0-01 新增，data=SourceRef 列表 JSON）/ end（收尾标记）")
     @ApiResponses(value = {
             @ApiResponse(responseCode = "200", description = "问答成功（流式）",
                     content = @Content(mediaType = "text/event-stream")),
@@ -65,7 +67,7 @@ public class ChatController {
             @ApiResponse(responseCode = "404", description = "知识库不存在")
     })
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<String> streamChat(@Valid @RequestBody ChatRequest request) {
+    public Flux<ServerSentEvent<String>> streamChat(@Valid @RequestBody ChatRequest request) {
         return chatService.streamChat(request);
     }
 }

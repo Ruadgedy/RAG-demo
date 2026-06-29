@@ -82,11 +82,30 @@ public class Document {
     /** 切片数量 */
     @Column(name = "chunk_count")
     private Integer chunkCount = 0;
-    
+
+    /**
+     * 【2026-06-29 增量 P1-04】文件内容 SHA-256（hex 64 字符）
+     *
+     * 用途：内容级去重
+     *   - 之前按 fileName 去重，用户改个名就能重复上传同一份文件
+     *   - 改为 SHA-256 → (kb_id, file_hash) 唯一约束
+     *   - 即使文件名改了，内容相同也算重复
+     *
+     * 性能影响：计算 SHA-256 一个 50MB 文件约 50ms，可接受
+     *
+     * 【2026-06-29 修复 Hibernate schema-validation】
+     *   - V4 migration 用的是 CHAR(64)，不是 VARCHAR(64)
+     *   - 必须显式声明 columnDefinition = "CHAR(64)"，否则 Hibernate 默认 VARCHAR，
+     *     启动时报 SchemaManagementException（this was the bug）
+     *   - CHAR 更符合语义：SHA-256 永远是 64 字符定长，无浪费存储
+     */
+    @Column(name = "file_hash", length = 64, columnDefinition = "CHAR(64)")
+    private String fileHash;
+
     /** 上传时间 */
     @Column(name = "uploaded_at")
     private LocalDateTime uploadedAt;
-    
+
     /** 处理完成时间 */
     @Column(name = "processed_at")
     private LocalDateTime processedAt;

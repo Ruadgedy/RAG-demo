@@ -81,10 +81,23 @@ public class DocumentService {
             throw new IllegalArgumentException("不支持的文件类型: " + fileType + "，仅支持 PDF、DOC、DOCX、XLS、XLSX、PPT、PPTX、TXT");
         }
 
-        // 检查同名文件是否已存在
+        // 【2026-06-29 增量 P1-04】按文件内容 SHA-256 做内容级去重
+        // 计算哈希：50MB 文件约 50ms，可接受
+        // 双层校验：先查 DB（友好错误信息），再依赖唯一约束（防并发竞态）
+        byte[] fileBytes = file.getBytes();
+        String fileHash = sha256Hex(fileBytes);
+
+        Optional<Document> existingByHash = documentRepository.findByKnowledgeBaseIdAndFileHash(knowledgeBaseId, fileHash);
+        if (existingByHash.isPresent()) {
+            throw new IllegalArgumentException(
+                "文件内容已存在（哈希 " + fileHash.substring(0, 8) + "...），重复上传将浪费 embedding 算力。"
+                + "如需替换请先删除旧文档: " + existingByHash.get().getFileName());
+        }
+
+        // 第一层校验：按文件名再查一次（保护老的逻辑，未来可以考虑去除）
         Optional<Document> existingDoc = documentRepository.findByKnowledgeBaseIdAndFileName(knowledgeBaseId, fileName);
         if (existingDoc.isPresent()) {
-            throw new IllegalArgumentException("文件已存在: " + fileName);
+            throw new IllegalArgumentException("文件名已存在: " + fileName);
         }
 
         // 创建上传目录
@@ -126,6 +139,7 @@ public class DocumentService {
         document.setFileName(fileName);
         document.setFileType(fileType);
         document.setFilePath(filePath.toString());
+        document.setFileHash(fileHash);   // 【P1-04】持久化内容哈希
         document.setStatus(Document.DocumentStatus.UPLOADING);
         document.setProgress(10);  // 10%进度
 
@@ -216,9 +230,37 @@ public class DocumentService {
      * 支持的格式：PDF、Word(doc/docx)、Excel(xls/xlsx)、PowerPoint(ppt/pptx)、TXT
      */
     private boolean isSupportedFileType(String fileType) {
-        return "pdf".equals(fileType) || "doc".equals(fileType) || "docx".equals(fileType) 
+        return "pdf".equals(fileType) || "doc".equals(fileType) || "docx".equals(fileType)
             || "xls".equals(fileType) || "xlsx".equals(fileType)
             || "ppt".equals(fileType) || "pptx".equals(fileType)
             || "txt".equals(fileType);
+    }
+
+    /**
+     * 【2026-06-29 增量 P1-04】计算文件内容的 SHA-256（hex 编码）
+     *
+     * 用法：上传时算哈希 → 查 (kb_id, file_hash) 是否重复
+     *
+     * 为什么是 SHA-256：
+     *   - 抗碰撞：生日攻击需 2^128 次，不可行
+     *   - 速度：JDK 自带 MessageDigest，50MB 文件约 50ms
+     *   - 长度固定：64 hex 字符，便于建索引
+     *
+     * @param fileBytes 文件原始字节
+     * @return 64 字符 hex 字符串（小写）
+     */
+    private String sha256Hex(byte[] fileBytes) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(fileBytes);
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            // SHA-256 是 JDK 必有的算法，这里抛 RuntimeException 仅作兜底
+            throw new RuntimeException("SHA-256 算法不可用", e);
+        }
     }
 }

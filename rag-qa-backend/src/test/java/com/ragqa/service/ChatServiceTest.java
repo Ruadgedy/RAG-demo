@@ -16,6 +16,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 /**
@@ -51,7 +52,8 @@ class ChatServiceTest {
         request.setKnowledgeBaseId(kbId);
 
         // 【V3】RagService.chat() 现在返回 ChatResult(answer, retrievedDocs, retrievalDurationMs)
-        when(ragService.chat("测试问题", kbId))
+        // 【2026-06-29 P0-02】RagService.chat 新增 history 参数
+        when(ragService.chat(eq("测试问题"), eq(kbId), any()))
                 .thenReturn(new com.ragqa.service.RagService.ChatResult(
                         "这是测试回答", java.util.List.of(), 0L));
 
@@ -61,7 +63,7 @@ class ChatServiceTest {
         assertThat(result.getSessionId()).isNotNull();
         // 【V3】一个回合 = 一条记录（query + content + rag_metadata）
         verify(chatHistoryRepository, times(1)).saveAndFlush(any());
-        verify(ragService).chat("测试问题", kbId);
+        verify(ragService).chat(eq("测试问题"), eq(kbId), any());
     }
 
     @Test
@@ -72,7 +74,7 @@ class ChatServiceTest {
         request.setKnowledgeBaseId(kbId);
 
         // 【V3】RagService.chat() 返回 ChatResult
-        when(ragService.chat("测试问题", kbId))
+        when(ragService.chat(eq("测试问题"), eq(kbId), any()))
                 .thenReturn(new com.ragqa.service.RagService.ChatResult(
                         "该知识库暂无文档，请先上传文档。", java.util.List.of(), 0L));
 

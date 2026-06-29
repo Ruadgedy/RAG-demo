@@ -399,24 +399,26 @@ private final Map<UUID, Map<String, List<BM25Doc>>> bm25Index = new ConcurrentHa
 
 | ID | 状态 | 完成时间 | PR / 备注 |
 |----|------|----------|-----------|
-| P0-01 | [ ] | | |
-| P0-02 | [ ] | | |
-| P0-03 | [ ] | | |
-| P0-04 | [ ] | | |
-| P1-01 | [ ] | | |
-| P1-02 | [ ] | | |
-| P1-03 | [ ] | | |
-| P1-04 | [ ] | | |
-| P1-05 | [ ] | | |
-| P1-06 | [ ] | | |
-| P2-01 | [ ] | | |
-| P2-02 | [ ] | | |
-| P2-03 | [ ] | | |
-| P2-04 | [ ] | | |
-| P2-05 | [ ] | | |
-| P2-06 | [ ] | | |
-| P2-07 | [ ] | | |
-| P2-08 | [ ] | | |
+| P0-01 | [x] | 2026-06-29 | SourceRef DTO + SSE 4 类事件 + SourceCard 组件 |
+| P0-02 | [x] | 2026-06-29 | query rewrite + buildPromptWithHistory + RAG_HISTORY_TURNS=3 |
+| P0-03 | [x] | 2026-06-29 | ALLOWED_ORIGINS env 列表，禁 `* + credentials` 组合 |
+| P0-04 | [x] | 2026-06-29 | DocumentController.java:167 已存在，无需改动（核查结论） |
+| P1-01 | [x] | 2026-06-29 | ChromaService include `embeddings` + Java 端 cosine，零迁移 |
+| P1-02 | [x] | 2026-06-29 | Ollama `/api/rerank` 真实 cross-encoder，passthrough 兜底 |
+| P1-03 | [x] | 2026-06-29 | HybridSearchService `@Value` 默认对齐 + 启动日志 |
+| P1-04 | [x] | 2026-06-29 | SHA-256 + UNIQUE 索引 + V4 migration |
+| P1-05 | [ ] | | OCR 语言未拆 KB 级别字段 |
+| P1-06 | [x] | 2026-06-29 | CHUNK_SIZE=800 / CHUNK_OVERLAP=100 |
+| P2-01 | [x] | 2026-06-29 | 完整 eval 子模块：RetrievalEvaluator + AnswerEvaluator + EvalService + CLI + REST |
+| P2-02 | [ ] | | Micrometer Tracing + Zipkin |
+| P2-03 | [ ] | | Chunk ID 防御性改造 |
+| P2-04 | [ ] | | BM25 索引持久化 |
+| P2-05 | [ ] | | 文档删除 BM25 清理时序 |
+| P2-06 | [ ] | | Embedding 按 KB 配置 |
+| P2-07 | [ ] | | 前端命名规范统一 |
+| P2-08 | [ ] | | Prompt 模板外置到 resources |
+
+**进度**：11 / 18 = **61%**（P0 全清，P1 仅 OCR 一项遗留，P2 完成 1/8）
 
 ---
 

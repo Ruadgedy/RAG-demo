@@ -78,7 +78,7 @@ class ChatControllerTest {
         request.setKnowledgeBaseId(UUID.randomUUID());
 
         when(chatService.chat(any(ChatRequest.class)))
-                .thenReturn(new ChatResponse("session-123", "RAG 是检索增强生成..."));
+                .thenReturn(new ChatResponse("session-123", "RAG 是检索增强生成...", List.of()));
 
         mockMvc.perform(post("/api/chat")
                         .with(authentication(new UsernamePasswordAuthenticationToken(

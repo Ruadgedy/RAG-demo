@@ -4,6 +4,8 @@ import com.ragqa.service.Bm25SearchService.Bm25Result;
 import com.ragqa.service.Bm25SearchService.DocumentChunk;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -86,7 +88,10 @@ public class HybridSearchService {
 
     /** 是否启用混合检索 */
     // 【说明】设为 false 时，退化为纯向量检索
-    @Value("${hybrid.retrieval.enabled:false}")
+    // 【2026-06-29 修复 P1-03】原默认值 "false" 与 application.properties 的 ${HYBRID_ENABLED:true} 不一致，
+    // 会导致代码注释与实际行为不符（运行时实际为 true）。这里把默认值也对齐为 true，
+    // 同时增加启动日志打印当前真实开关状态，方便运维确认。
+    @Value("${hybrid.retrieval.enabled:true}")
     private boolean hybridEnabled;
 
     /** 向量检索的融合权重 */
@@ -127,6 +132,28 @@ public class HybridSearchService {
         this.chromaService = chromaService;
         this.bm25Service = bm25Service;
         this.embeddingService = embeddingService;
+    }
+
+    /**
+     * 【2026-06-29 增量 P1-03】启动后打印检索配置日志
+     *
+     * 解决运维盲区：之前 hybrid.enabled / vector_weight / bm25_weight 等都是 @Value 注入，
+     * 启动时不在日志暴露，部署到生产后无法一眼看出当前是纯向量还是混合检索。
+     *
+     * ApplicationReadyEvent 在整个 Spring 容器就绪、所有 Bean 装配完成后触发，
+     * 此时 @Value 已完成注入，可以读到准确值。
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void logRetrievalConfig() {
+        log.info("====== 混合检索配置 ======");
+        log.info("  hybrid.enabled    = {}", hybridEnabled);
+        log.info("  vector_weight     = {}", vectorWeight);
+        log.info("  bm25_weight       = {}", bm25Weight);
+        log.info("  defaultTopK       = {}", defaultTopK);
+        log.info("==========================");
+        if (!hybridEnabled) {
+            log.warn("⚠️ 当前为纯向量检索模式（hybrid.enabled=false），关键词召回能力受限");
+        }
     }
 
     // ============================================================

@@ -100,14 +100,21 @@ export const useChatStore = defineStore('chat', () => {
       history: messages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
     })
     if (data?.sessionId) currentSessionId.value = data.sessionId
-    messages.value.push({ role: 'assistant', content: data?.answer ?? '' })
+    // 【2026-06-29 增量 P0-01】保存来源引用，前端渲染"参考文档"卡片
+    messages.value.push({
+      role: 'assistant',
+      content: data?.answer ?? '',
+      sources: Array.isArray(data?.sources) ? data.sources : [],
+    })
   }
 
   async function sendStream(text, kbId) {
     // 占位 assistant
     const assistantIndex = messages.value.length
-    messages.value.push({ role: 'assistant', content: '' })
+    messages.value.push({ role: 'assistant', content: '', sources: [] })
     let accumulated = ''
+    // 【2026-06-29 增量 P0-01】来源在 LLM 收尾时才到位，先存到临时变量
+    let sourcesBuffer = []
 
     abortController.value = chatApi.streamChat(
       {
@@ -119,12 +126,27 @@ export const useChatStore = defineStore('chat', () => {
         onSessionId: (sid) => { currentSessionId.value = sid },
         onChunk: (chunk) => {
           accumulated += chunk
-          messages.value[assistantIndex] = { role: 'assistant', content: accumulated }
+          // 注意：保留 sources 字段（之前 onSources 写过）
+          messages.value[assistantIndex] = {
+            role: 'assistant',
+            content: accumulated,
+            sources: sourcesBuffer,
+          }
+        },
+        onSources: (sources) => {
+          // 【2026-06-29 增量 P0-01】SSE sources 事件触发，把来源写回消息
+          sourcesBuffer = Array.isArray(sources) ? sources : []
+          messages.value[assistantIndex] = {
+            role: 'assistant',
+            content: accumulated,
+            sources: sourcesBuffer,
+          }
         },
         onError: (e) => {
           messages.value[assistantIndex] = {
             role: 'assistant',
             content: accumulated + `\n\n⚠️ 生成中断：${e.message}`,
+            sources: sourcesBuffer,
           }
         },
         onDone: () => {

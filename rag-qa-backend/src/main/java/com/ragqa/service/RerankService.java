@@ -1,124 +1,152 @@
 package com.ragqa.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestTemplate;
 
+import java.time.Duration;
 import java.util.*;
 
 /**
  * Cross-Encoder 重排序服务
  *
- * 作用：对初步检索结果进行精细排序，提高最终答案质量
+ * 作用：对初步检索结果做精细排序，提升 top-K 精度。
  *
- * 为什么需要重排序：
- * ┌─────────────────────────────────────────────────────────────────┐
- * │                    两阶段检索流程                                  │
- * ├─────────────────────────────────────────────────────────────────┤
- * │                                                                 │
- * │   第一阶段：向量检索（召回）                                        │
- * │   ─────────────────────────────────────────────────────────      │
- * │   用户问题 → Embedding → Chroma 向量检索 → Top-20 候选           │
- * │   目标：快速从海量文档中找到可能相关的候选                            │
- * │   特点：快，但可能漏掉或误匹配                                        │
- * │                                                                 │
- * │   第二阶段：Cross-Encoder 重排（精排）                              │
- * │   ─────────────────────────────────────────────────────────      │
- * │   候选文档 + 问题 → Cross-Encoder → 精确相关性打分 → Top-5          │
- * │   目标：对候选进行精细排序，找到最相关的                               │
- * │   特点：准，但需要逐个计算（比向量检索慢）                            │
- * │                                                                 │
- * └─────────────────────────────────────────────────────────────────┘
+ * 两阶段检索流程：
+ * <pre>
+ *   ┌─────────────────────────────────────────────────────────────────┐
+ *   │  第一阶段：向量检索（召回）                                          │
+ *   │  ────────────────────────────────────────────────────────────    │
+ *   │  用户问题 → Embedding → Chroma 向量检索 → Top-20 候选                │
+ *   │  目标：快，覆盖广                                                  │
+ *   │  特点：可能漏掉正确答案，或召回若干"看着像但其实无关"的噪音              │
+ *   ├─────────────────────────────────────────────────────────────────┤
+ *   │  第二阶段：Cross-Encoder 重排（精排）★ 本服务                       │
+ *   │  ────────────────────────────────────────────────────────────    │
+ *   │  (候选, 问题) → Cross-Encoder → 相关性打分 → Top-3                  │
+ *   │  目标：准，对候选精细排序                                            │
+ *   │  特点：慢，但能识别"语义相似但实际不相关"的噪音                        │
+ *   └─────────────────────────────────────────────────────────────────┘
+ * </pre>
  *
- * Cross-Encoder vs Bi-Encoder：
+ * Bi-Encoder vs Cross-Encoder：
+ * <pre>
+ *   ┌─────────────────┬──────────────────┬──────────────────┐
+ *   │                 │  Bi-Encoder      │ Cross-Encoder    │
+ *   ├─────────────────┼──────────────────┼──────────────────┤
+ *   │ 工作方式         │ Q → emb,         │ (Q, D) →         │
+ *   │                 │ D → emb,         │ joint emb →      │
+ *   │                 │ cosine(embs)      │ score            │
+ *   ├─────────────────┼──────────────────┼──────────────────┤
+ *   │ 速度             │ 快（离线预计算）   │ 慢（在线两两计算）│
+ *   │ 准确度           │ 中               │ 高               │
+ *   └─────────────────┴──────────────────┴──────────────────┘
+ * </pre>
  *
- * ┌─────────────────┬──────────────────┬──────────────────┐
- * │                 │  Bi-Encoder      │ Cross-Encoder    │
- * ├─────────────────┼──────────────────┼──────────────────┤
- * │ 工作方式         │                  │                  │
- * │                 │ 问题 → Encoder →  │ [问题, 文档] →   │
- * │                 │ 文档 → Encoder →  │ Encoder → score  │
- * │                 │ 向量 → 相似度     │                  │
- * ├─────────────────┼──────────────────┼──────────────────┤
- * │ 速度             │ 快（一次编码）     │ 慢（两两计算）    │
- * │                 │ 可预计算向量       │ 需要实时计算      │
- * ├─────────────────┼──────────────────┼──────────────────┤
- * │ 准确度           │ 中等              │ 高               │
- * │                 │ 依赖向量空间       │ 直接学习相关性     │
- * ├─────────────────┼──────────────────┼──────────────────┤
- * │ 适用场景         │ 第一阶段召回       │ 第二阶段精排      │
- * └─────────────────┴──────────────────┴──────────────────┘
+ * 【2026-06-29 升级 P1-02】从「关键词打分模拟」切换到真实 cross-encoder
  *
- * 使用场景示例：
- * 用户问："Java 中如何实现多线程？"
+ * 历史问题：原 scoreCandidates() 用关键词匹配 + 位置加权做"伪 rerank"。
+ *   实际效果：经常把"包含 query 字面词"的噪音文档排在前面，反而拖累 LLM。
  *
- * 向量检索结果（可能的问题）：
- * 1. "Python 的多线程实现方式"      score=0.85  ← 语义相关但不够精确
- * 2. "Java 继承的使用方法"         score=0.82  ← Java 相关但不是多线程
- * 3. "Java 多线程的 Thread 类"     score=0.80  ← ✅ 精确匹配
- * 4. "并发编程概述"                 score=0.78  ← 相关但不精确
- * 5. "Thread 和 Runnable 区别"      score=0.75  ← ✅ 精确匹配
+ * 新实现：调用 Ollama 0.4+ 的 /api/rerank 端点，用真正的 cross-encoder 模型。
+ *   - 默认模型：qwen3-reranker:4b（与本地 embedding 模型 qwen3-embedding:4b 配套）
+ *   - 备用模型：bge-reranker-v2-m3（多语言版，质量略高但稍慢）
+ *   - 安装命令：ollama pull qwen3-reranker:4b
  *
- * Cross-Encoder 重排后：
- * 1. "Java 多线程的 Thread 类"     score=0.95  ← 精确匹配
- * 2. "Thread 和 Runnable 区别"      score=0.93  ← 精确匹配
- * 3. "并发编程概述"                 score=0.72  ← 降级
- * 4. "Python 的多线程实现方式"      score=0.65  ← 降级（不是 Java）
- * 5. "Java 继承的使用方法"         score=0.55  ← 降级（不是多线程）
+ * 失败回退：Ollama 调用失败时（模型未拉取、超时、网络问题），自动降级为直接返回
+ *   原始候选列表（按向量分数排序），并打 WARN 日志。不阻塞用户请求。
  *
  * 配置项：
- * - rerank.enabled: 是否启用重排序
- * - rerank.model: 重排序模型（可选本地 Ollama 或云服务）
- * - rerank.topk: 重排后返回的结果数
+ *   rerank.enabled           是否启用（默认 false，需手动开启）
+ *   rerank.model             Ollama 中的 rerank 模型名
+ *   rerank.topk              重排后返回数（传给 LLM 的 top-K）
+ *   rerank.ollama-url        Ollama 地址（默认与 embedding 同地址）
+ *   rerank.timeout-seconds   Ollama 调用超时（cross-encoder 比 embedding 慢）
  */
 @Service
 @Slf4j
 public class RerankService {
 
-    /** 是否启用重排序 */
+    /**
+     * RestTemplate：连接/读取超时单独配
+     *
+     * cross-encoder 在长文档上推理较慢（BGE-large 大约 500ms-2s/候选×20 候选 ≈ 10-40s），
+     * 这里 connect=5s / read=60s（默认值 60s）。
+     */
+    private final RestTemplate restTemplate;
+
+    /** JSON 解析器 */
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /** 是否启用重排序（默认关闭，需显式开启） */
     @Value("${rerank.enabled:false}")
     private boolean rerankEnabled;
 
-    /** 重排序模型名称 */
-    @Value("${rerank.model:bge-reranker-base}")
+    /** Ollama rerank 模型名（如 qwen3-reranker:4b / bge-reranker-v2-m3） */
+    @Value("${rerank.model:qwen3-reranker:4b}")
     private String modelName;
 
-    /** 重排后返回的结果数 */
+    /** 重排后返回结果数（传给 LLM 的 top-K） */
     @Value("${rerank.topk:5}")
     private int defaultTopK;
 
+    /** Ollama 服务地址，默认与 embedding 同一实例 */
+    @Value("${rerank.ollama-url:http://localhost:11434}")
+    private String ollamaUrl;
+
     /**
-     * 重排序候选结果
+     * Ollama rerank 调用的 HTTP 超时（秒）
+     *
+     * 【为什么单独配】
+     * - cross-encoder 比 embedding 模型慢一个数量级
+     * - 20 个候选 + 4B 参数模型在 CPU 上可能 30s+ 完成
+     * - 默认 RestTemplate 超时太短会误杀正常调用
+     */
+    @Value("${rerank.timeout-seconds:60}")
+    private int timeoutSeconds;
+
+    public RerankService() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout((int) Duration.ofSeconds(5).toMillis());
+        factory.setReadTimeout((int) Duration.ofSeconds(60).toMillis()); // 默认值，会被 setReadTimeout 覆盖
+        this.restTemplate = new RestTemplate(factory);
+    }
+
+    /**
+     * 重排序候选（内部数据结构，保留供向后兼容）
      */
     public static class RerankCandidate {
-        private final String content;      // 文档内容
-        private final String documentId;  // 文档ID
-        private final int chunkIndex;     // 切片索引
-        private final double originalScore; // 原始分数（向量检索）
-        private double rerankScore;       // 重排分数
-        private double finalScore;        // 综合分数（融合）
+        private final String content;
+        private final String documentId;
+        private final int chunkIndex;
+        private final double originalScore;
 
         public RerankCandidate(String content, String documentId, int chunkIndex, double originalScore) {
             this.content = content;
             this.documentId = documentId;
             this.chunkIndex = chunkIndex;
             this.originalScore = originalScore;
-            this.rerankScore = 0.0;
-            this.finalScore = 0.0;
         }
 
         public String getContent() { return content; }
         public String getDocumentId() { return documentId; }
         public int getChunkIndex() { return chunkIndex; }
         public double getOriginalScore() { return originalScore; }
-        public double getRerankScore() { return rerankScore; }
-        public double getFinalScore() { return finalScore; }
-        public void setRerankScore(double rerankScore) { this.rerankScore = rerankScore; }
-        public void setFinalScore(double finalScore) { this.finalScore = finalScore; }
     }
 
     /**
-     * 重排序结果
+     * 重排序结果（对外接口）
+     *
+     * @param content 切片内容
+     * @param documentId 文档 UUID（String 形式）
+     * @param chunkIndex 切片在文档中的索引
+     * @param score 重排分数（cross-encoder 输出，范围由模型决定，常见 [0,1] 或 [-1,1]）
+     * @param source 来源标识：VECTOR（未重排）/ RERANKED（cross-encoder 重排过）
      */
     public static class RerankResult {
         private final String content;
@@ -143,61 +171,68 @@ public class RerankService {
     }
 
     /**
-     * 执行重排序
+     * 执行重排序（统一入口）
+     *
+     * 行为：
+     *   - rerank.enabled=false → 直接 passthrough（按输入顺序截前 topK）
+     *   - rerank.enabled=true  → 调用 Ollama /api/rerank，按模型返回的相关性重排
+     *   - Ollama 调用失败      → 自动降级为 passthrough + WARN 日志（不阻塞请求）
      *
      * @param query 用户查询
-     * @param candidates 候选结果（来自向量检索）
-     * @param topK 返回结果数
-     * @return 重排后的结果
+     * @param candidates 候选列表（来自向量检索或混合检索）
+     * @param topK 返回前 K 个
+     * @return 重排后的结果（始终不返回 null）
      */
     public List<RerankResult> rerank(String query, List<?> candidates, int topK) {
-        if (!rerankEnabled) {
-            log.debug("重排序已禁用");
-            return convertToSimpleResults(candidates);
-        }
-
         if (candidates == null || candidates.isEmpty()) {
             return Collections.emptyList();
         }
 
-        log.info("开始重排序，候选数: {}, 查询: {}", candidates.size(), query);
-
-        // 转换为候选列表
-        List<RerankCandidate> candidateList = convertToCandidates(candidates);
-        if (candidateList.isEmpty()) {
-            return Collections.emptyList();
+        // 未启用 → 直接 passthrough（保留旧行为兼容性）
+        if (!rerankEnabled) {
+            log.debug("rerank.enabled=false，直接 passthrough");
+            return passthrough(candidates, topK);
         }
 
-        // Step 1: Cross-Encoder 打分
-        // 这里使用简化实现，实际应该调用 Cross-Encoder 模型
-        // 由于本地可能没有 Cross-Encoder 模型，提供基于关键词的轻量打分
-        scoreCandidates(query, candidateList);
+        log.info("开始 Cross-Encoder 重排序：model={}, candidates={}, query='{}'",
+                modelName, candidates.size(), truncate(query, 50));
 
-        // Step 2: 融合原始分数和重排分数
-        fuseScores(candidateList);
+        try {
+            // 1. 提取候选文本 + 元数据
+            List<RerankCandidate> candidateList = extractCandidates(candidates);
+            if (candidateList.isEmpty()) {
+                return Collections.emptyList();
+            }
 
-        // Step 3: 按融合分数排序
-        candidateList.sort((a, b) -> Double.compare(b.getFinalScore(), a.getFinalScore()));
+            // 2. 调用 Ollama /api/rerank
+            List<Integer> rankedIndices = callOllamaRerank(query, candidateList, topK);
 
-        // Step 4: 取 Top-K
-        List<RerankResult> results = new ArrayList<>();
-        int count = 0;
-        for (RerankCandidate c : candidateList) {
-            if (count >= topK) break;
-            results.add(new RerankResult(
-                    c.getContent(), c.getDocumentId(), c.getChunkIndex(),
-                    c.getFinalScore(), "RERANKED"));
-            count++;
+            // 3. 按 rerank 分数从高到低组装结果
+            List<RerankResult> results = new ArrayList<>();
+            for (Integer idx : rankedIndices) {
+                if (idx < 0 || idx >= candidateList.size()) continue;
+                RerankCandidate c = candidateList.get(idx);
+                results.add(new RerankResult(
+                        c.getContent(), c.getDocumentId(), c.getChunkIndex(),
+                        c.getOriginalScore(), "RERANKED"));
+            }
+
+            log.info("重排序完成：{} 候选 → top-{} 结果", candidateList.size(), results.size());
+            return results;
+
+        } catch (Exception e) {
+            // Ollama 调用失败（模型未拉取、超时、网络问题）→ 降级 passthrough
+            log.warn("Cross-Encoder rerank 调用失败，降级为 passthrough：{}", e.getMessage());
+            return passthrough(candidates, topK);
         }
-
-        log.info("重排序完成，返回 {} 条结果", results.size());
-        return results;
     }
 
     /**
-     * 简化版重排序（禁用时的降级方案）
+     * 候选直通（rerank 关闭或失败时使用）
+     *
+     * 按候选原始分数降序排，取 topK。
      */
-    private List<RerankResult> convertToSimpleResults(List<?> candidates) {
+    private List<RerankResult> passthrough(List<?> candidates, int topK) {
         List<RerankResult> results = new ArrayList<>();
         for (Object c : candidates) {
             try {
@@ -211,21 +246,27 @@ public class RerankService {
                     results.add(new RerankResult(
                             r.getContent(), r.getDocumentId(), r.getChunkIndex(),
                             r.getScore(), r.getSource()));
+                } else {
+                    log.warn("未知候选类型，跳过: {}", c == null ? "null" : c.getClass().getName());
                 }
             } catch (Exception e) {
-                log.warn("转换候选结果失败: {}", e.getMessage());
+                log.warn("候选转换失败: {}", e.getMessage());
             }
+        }
+
+        // 已经有分数 → 按分数降序
+        results.sort((a, b) -> Double.compare(b.getScore(), a.getScore()));
+        if (results.size() > topK) {
+            return results.subList(0, topK);
         }
         return results;
     }
 
     /**
-     * 转换为候选列表
+     * 提取通用候选为 RerankCandidate 列表
      */
-    @SuppressWarnings("unchecked")
-    private List<RerankCandidate> convertToCandidates(List<?> candidates) {
+    private List<RerankCandidate> extractCandidates(List<?> candidates) {
         List<RerankCandidate> result = new ArrayList<>();
-
         for (Object c : candidates) {
             try {
                 if (c instanceof ChromaService.SearchResult) {
@@ -236,187 +277,99 @@ public class RerankService {
                     HybridSearchService.HybridSearchResult r = (HybridSearchService.HybridSearchResult) c;
                     result.add(new RerankCandidate(
                             r.getContent(), r.getDocumentId(), r.getChunkIndex(), r.getScore()));
+                } else {
+                    log.warn("跳过未知候选类型: {}", c == null ? "null" : c.getClass().getName());
                 }
             } catch (Exception e) {
-                log.warn("跳过无效候选: {}", e.getMessage());
+                log.warn("候选解析失败: {}", e.getMessage());
             }
         }
-
         return result;
     }
 
     /**
-     * 对候选进行打分
+     * 调用 Ollama /api/rerank 端点
      *
-     * 简化实现：基于关键词匹配的打分
+     * Ollama rerank API（0.4+）：
+     *   POST {ollamaUrl}/api/rerank
+     *   Body: {"model": "...", "query": "...", "documents": [...], "top_n": N}
+     *   Response: {"model": "...", "results": [{"index": 0, "relevance_score": 0.95}, ...]}
      *
-     * 实际生产环境应该：
-     * 1. 调用 Ollama 部署的 Cross-Encoder 模型
-     * 2. 或调用 SiliconFlow 等云服务的 Rerank API
+     * 注意：response 里的 results 已按 relevance_score 降序排，直接取 index 用即可。
      *
-     * @param query 用户查询
+     * @param query 查询
      * @param candidates 候选列表
+     * @param topN 返回前 N 个的索引
+     * @return 按相关性降序排列的候选索引列表（已限制 topN 个）
+     * @throws Exception 网络/HTTP/解析异常（由调用方降级处理）
      */
-    private void scoreCandidates(String query, List<RerankCandidate> candidates) {
-        // 提取查询关键词
-        List<String> queryKeywords = extractKeywords(query);
+    private List<Integer> callOllamaRerank(String query, List<RerankCandidate> candidates, int topN) throws Exception {
+        // 1. 动态设置 read timeout（构造时的默认值会被本次覆盖）
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout((int) Duration.ofSeconds(5).toMillis());
+        factory.setReadTimeout((int) Duration.ofSeconds(timeoutSeconds).toMillis());
+        RestTemplate rt = new RestTemplate(factory);
 
-        for (RerankCandidate candidate : candidates) {
-            double score = calculateRelevance(query, queryKeywords, candidate.getContent());
-            candidate.setRerankScore(score);
-            log.debug("候选 [{}] 重排分数: {}", candidate.getChunkIndex(), score);
-        }
-    }
+        // 2. 构建请求体
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", modelName);
+        body.put("query", query);
+        body.put("top_n", topN);
 
-    /**
-     * 计算内容与查询的相关性分数
-     *
-     * 基于：
-     * 1. 关键词命中数量
-     * 2. 关键词位置（标题优先）
-     * 3. 关键词密度
-     *
-     * @param query 用户查询
-     * @param queryKeywords 查询关键词
-     * @param content 文档内容
-     * @return 0-1 之间的相关性分数
-     */
-    private double calculateRelevance(String query, List<String> queryKeywords, String content) {
-        if (content == null || queryKeywords.isEmpty()) {
-            return 0.0;
-        }
-
-        content = content.toLowerCase();
-        int matchCount = 0;
-        int positionBonus = 0;
-
-        for (String keyword : queryKeywords) {
-            keyword = keyword.toLowerCase();
-
-            // 统计命中次数
-            int occurrences = countOccurrences(content, keyword);
-            matchCount += occurrences;
-
-            // 位置奖励：关键词出现在前面给高分
-            int position = content.indexOf(keyword);
-            if (position >= 0 && position < 50) {
-                positionBonus += (50 - position) / 10;
-            }
-        }
-
-        // 归一化分数
-        double keywordScore = Math.min(1.0, matchCount / (double) queryKeywords.size());
-        double positionScore = Math.min(1.0, positionBonus / (double) queryKeywords.size());
-
-        // 综合分数：关键词权重 0.7，位置权重 0.3
-        return keywordScore * 0.7 + positionScore * 0.3;
-    }
-
-    /**
-     * 提取查询关键词
-     */
-    private List<String> extractKeywords(String query) {
-        List<String> keywords = new ArrayList<>();
-
-        // 简单分词：按空格和标点分割
-        String[] words = query.split("[\\s\\p{Punct}]+");
-
-        for (String word : words) {
-            word = word.trim();
-            // 过滤太短和太长的词
-            if (word.length() >= 2 && word.length() <= 20) {
-                // 过滤常见停用词
-                if (!isStopWord(word)) {
-                    keywords.add(word);
-                }
-            }
-        }
-
-        return keywords;
-    }
-
-    /**
-     * 判断是否为停用词
-     */
-    private boolean isStopWord(String word) {
-        Set<String> stopWords = Set.of(
-                "的", "了", "和", "是", "在", "我", "有", "个", "之", "与",
-                "the", "a", "an", "is", "are", "was", "were", "be", "been",
-                "of", "and", "in", "to", "for", "with", "on", "at", "by",
-                "如何", "怎么", "什么", "哪个", "哪里", "为什么", "怎么样"
-        );
-        return stopWords.contains(word.toLowerCase());
-    }
-
-    /**
-     * 统计字符串中子串出现次数
-     */
-    private int countOccurrences(String text, String sub) {
-        int count = 0;
-        int idx = 0;
-        while ((idx = text.indexOf(sub, idx)) != -1) {
-            count++;
-            idx += sub.length();
-        }
-        return count;
-    }
-
-    /**
-     * 融合原始分数和重排分数
-     *
-     * 公式：finalScore = vectorWeight * norm(vectorScore) + rerankWeight * norm(rerankScore)
-     *
-     * @param candidates 候选列表
-     */
-    private void fuseScores(List<RerankCandidate> candidates) {
-        // 找出最大和最小的原始分数，用于归一化
-        double maxOrig = 0, minOrig = Double.MAX_VALUE;
-        double maxRerank = 0, minRerank = Double.MAX_VALUE;
-
+        // documents 字段：纯字符串数组（Ollama rerank API 格式）
+        List<String> documents = new ArrayList<>();
         for (RerankCandidate c : candidates) {
-            maxOrig = Math.max(maxOrig, c.getOriginalScore());
-            minOrig = Math.min(minOrig, c.getOriginalScore());
-            maxRerank = Math.max(maxRerank, c.getRerankScore());
-            minRerank = Math.min(minRerank, c.getRerankScore());
+            // 截断过长的文档（cross-encoder 有 token 上限，通常 512-8192 tokens）
+            // 8000 字符 ≈ 2000-4000 中文字，安全范围
+            String content = c.getContent();
+            if (content != null && content.length() > 8000) {
+                content = content.substring(0, 8000) + "...";
+            }
+            documents.add(content == null ? "" : content);
+        }
+        body.put("documents", documents);
+
+        // 3. 发送请求
+        String url = ollamaUrl + "/api/rerank";
+        String response = rt.postForObject(url, body, String.class);
+
+        // 4. 解析响应
+        JsonNode root = objectMapper.readTree(response);
+        JsonNode results = root.get("results");
+        if (results == null || !results.isArray()) {
+            throw new RuntimeException("Ollama rerank 响应缺少 results 字段");
         }
 
-        // 避免除零
-        double origRange = (maxOrig - minOrig) > 0 ? (maxOrig - minOrig) : 1;
-        double rerankRange = (maxRerank - minRerank) > 0 ? (maxRerank - minRerank) : 1;
-
-        // 权重
-        double vectorWeight = 0.4;
-        double rerankWeight = 0.6;
-
-        for (RerankCandidate c : candidates) {
-            // Min-Max 归一化
-            double normOrig = (c.getOriginalScore() - minOrig) / origRange;
-            double normRerank = (c.getRerankScore() - minRerank) / rerankRange;
-
-            // 综合分数
-            c.setFinalScore(vectorWeight * normOrig + rerankWeight * normRerank);
+        List<Integer> rankedIndices = new ArrayList<>();
+        for (JsonNode item : results) {
+            int idx = item.get("index").asInt();
+            rankedIndices.add(idx);
         }
+
+        log.debug("Ollama rerank 返回 {} 个索引（按相关性降序）", rankedIndices.size());
+        return rankedIndices;
     }
 
     /**
-     * 检查重排序是否启用
+     * 检查 rerank 是否启用
      */
     public boolean isEnabled() {
         return rerankEnabled;
     }
 
     /**
-     * 获取重排序模型名称
+     * 获取配置信息（调试 / 启动日志用）
      */
-    public String getModelName() {
-        return modelName;
+    public String getConfigInfo() {
+        return String.format("rerank config: enabled=%s, model=%s, topk=%d, ollama=%s, timeout=%ds",
+                rerankEnabled, modelName, defaultTopK, ollamaUrl, timeoutSeconds);
     }
 
     /**
-     * 获取配置信息
+     * 字符串截断（用于日志，避免超长 query 刷屏）
      */
-    public String getConfigInfo() {
-        return String.format("重排序配置: enabled=%s, model=%s, topk=%d",
-                rerankEnabled, modelName, defaultTopK);
+    private static String truncate(String s, int maxLen) {
+        if (s == null) return "";
+        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 }

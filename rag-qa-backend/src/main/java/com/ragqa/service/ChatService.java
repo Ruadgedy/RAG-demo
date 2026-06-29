@@ -4,13 +4,17 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ragqa.dto.ChatRequest;
 import com.ragqa.dto.ChatResponse;
+import com.ragqa.dto.SourceRef;
 import com.ragqa.model.ChatHistory;
 import com.ragqa.model.User;
 import com.ragqa.repository.ChatHistoryRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
@@ -58,6 +62,15 @@ public class ChatService {
     private boolean streamingEnabled;
 
     /**
+     * 【2026-06-29 增量 P0-01】来源 snippet 截取长度
+     *
+     * 前端「参考文档」卡片默认显示前 N 字符的内容摘要。值越大信息越全但响应体越大。
+     * 200 字符 ≈ 100-150 中文字，能展示一段话的核心信息。
+     */
+    @Value("${chat.source.snippet-length:200}")
+    private int sourceSnippetLength;
+
+    /**
      * 用于把 rag_metadata 序列化为 JSON 字符串。
      * 与 ChromaService 保持一致（new 一个独立实例，避免和 Spring MVC 共用产生干扰）
      */
@@ -78,9 +91,13 @@ public class ChatService {
 
         // 1. 委托给 RagService 执行检索增强生成
         //    【V3】返回值改为 ChatResult(answer, retrievedDocs, retrievalDurationMs)
+        //    【2026-06-29 增量 P0-02】传入 history，让 RagService 做 query rewrite + prompt 注入
         RagService.ChatResult result;
         try {
-            result = ragService.chat(request.getMessage(), request.getKnowledgeBaseId());
+            result = ragService.chat(
+                    request.getMessage(),
+                    request.getKnowledgeBaseId(),
+                    request.getHistory());
         } catch (Exception e) {
             log.error("RAG 问答失败: userId={}", userId, e);
             // 失败时仍要落库"用户问题"+"错误提示"，便于后续排查
@@ -90,7 +107,7 @@ public class ChatService {
             } catch (Exception ex) {
                 log.warn("[落库告警] 错误回合持久化失败: sessionId={}, userId={}", sessionId, userId, ex);
             }
-            return new ChatResponse(sessionId, "抱歉，AI服务暂时不可用，请稍后重试。");
+            return new ChatResponse(sessionId, "抱歉，AI服务暂时不可用，请稍后重试。", List.of());
         }
 
         // 2. 拼装 rag_metadata JSON 并落库
@@ -106,20 +123,35 @@ public class ChatService {
                     sessionId, userId, request.getMessage(), e);
         }
 
-        log.info("问答完成: sessionId={}, userId={}, answerLength={}, retrievedDocs={}",
+        // 3. 【2026-06-29 增量 P0-01】构建来源引用列表（用于前端展示"参考文档"卡片）
+        List<SourceRef> sources = buildSourceRefs(result.retrievedDocs());
+
+        log.info("问答完成: sessionId={}, userId={}, answerLength={}, retrievedDocs={}, sources={}",
                 sessionId, userId,
                 result.answer() == null ? 0 : result.answer().length(),
-                result.retrievedDocs().size());
-        return new ChatResponse(sessionId, result.answer());
+                result.retrievedDocs().size(),
+                sources.size());
+        return new ChatResponse(sessionId, result.answer(), sources);
     }
 
     /**
      * 流式问答
      *
+     * 【2026-06-29 增量 P0-01】返回类型从 Flux&lt;String&gt; 升级为 Flux&lt;ServerSentEvent&lt;String&gt;&gt;
+     *
+     * 历史问题：原协议只有文本片段，前端无法在流式响应结束时拿到 sources。
+     * 修复：用 Spring 的 ServerSentEvent 区分事件名：
+     *   - event=session-start : 首条事件，data 为 sessionId（前端用于刷新侧边栏）
+     *   - event=chunk        : 普通文本片段（与之前等价）
+     *   - event=sources      : 【新】收尾前发出，data 为 JSON 序列化的 List&lt;SourceRef&gt;
+     *   - event=end          : 【新】结束标记（前端可据此关闭 loading）
+     *
+     * 向后兼容：前端 parseSSE 收到 event=chunk 的 data 时追加，遇到 event=sources 时存到消息元数据。
+     *
      * @param request 问答请求
-     * @return Flux<String> - 回答片段流
+     * @return SSE 事件流
      */
-    public Flux<String> streamChat(ChatRequest request) {
+    public Flux<ServerSentEvent<String>> streamChat(ChatRequest request) {
         String userId = getCurrentUserId();
         log.info("收到流式问答请求: userId={}, message={}, streamingEnabled={}",
                 userId, request.getMessage(), streamingEnabled);
@@ -130,7 +162,10 @@ public class ChatService {
         if (!streamingEnabled) {
             RagService.ChatResult result;
             try {
-                result = ragService.chat(request.getMessage(), request.getKnowledgeBaseId());
+                result = ragService.chat(
+                    request.getMessage(),
+                    request.getKnowledgeBaseId(),
+                    request.getHistory());
             } catch (Exception e) {
                 log.error("非流式回退失败: sessionId={}", sessionId, e);
                 result = new RagService.ChatResult(
@@ -145,13 +180,23 @@ public class ChatService {
                 log.warn("[落库告警] 流式回退回合持久化失败: sessionId={}, userId={}",
                         sessionId, userId, e);
             }
-            return Flux.just(result.answer());
+            // 【P0-01】非流式回退也带上 sources event 和 end event，前端能正确收尾
+            List<SourceRef> sources = buildSourceRefs(result.retrievedDocs());
+            return Flux.just(
+                    sseEvent("session-start", sessionId),
+                    sseEvent("chunk", result.answer()),
+                    sseEvent("sources", serializeSources(sources)),
+                    sseEvent("end", "")
+            );
         }
 
         try {
             // 2. 检索相关文档（带计时）
             long retrievalStart = System.currentTimeMillis();
-            var docs = ragService.retrieveForStreaming(request.getMessage(), request.getKnowledgeBaseId());
+            var docs = ragService.retrieveForStreaming(
+                    request.getMessage(),
+                    request.getKnowledgeBaseId(),
+                    request.getHistory());
             long retrievalDurationMs = System.currentTimeMillis() - retrievalStart;
 
             if (docs.isEmpty()) {
@@ -163,53 +208,74 @@ public class ChatService {
                     log.warn("[落库告警] 空知识库提示持久化失败: sessionId={}, userId={}",
                             sessionId, userId, e);
                 }
-                return Flux.just(emptyMsg);
+                // 空知识库：无 sources，但仍发 session-start + chunk + end
+                return Flux.just(
+                        sseEvent("session-start", sessionId),
+                        sseEvent("chunk", emptyMsg),
+                        sseEvent("end", "")
+                );
             }
 
             // 3. 构建上下文和提示词
+            //    【2026-06-29 增量 P0-02】流式路径也用带历史的 prompt，与非流式保持一致
             String context = buildContext(docs);
-            String prompt = buildPrompt(context, request.getMessage());
+            String prompt = buildPromptWithHistory(context, request.getHistory(), request.getMessage());
 
             // 4. 调用 LLM，返回真正的流式响应
-            StringBuilder accumulator = new StringBuilder();
-            // 把 docs 列表引用捕获，doOnComplete 时用
+            // 【修复 2026-06-29】不能用 chunkEvents + tailEvents 分开订阅的设计：
+            //   chunkEvents 是 cold flux，第一次 SSE 订阅就消费完了，
+            //   tailEvents 里的 collectList() 订阅时已经无数据可用。
+            //   改用 Flux.defer() 包裹，让 LLM 流 + 收尾逻辑在同一个订阅周期内完成。
             final long finalRetrievalDurationMs = retrievalDurationMs;
             final List<RagService.RetrievalResult> finalDocs = docs;
 
-            return chatClientBuilder.build()
-                    .prompt(prompt)
-                    .stream()
-                    .content()
-                    .doOnNext(chunk -> accumulator.append(chunk))
-                    .doOnComplete(() -> {
-                        // 把阻塞的 JPA 操作调度到弹性线程池，避免在 Netty 事件循环中执行
-                        String fullAnswer = accumulator.toString();
-                        Mono.fromRunnable(() -> {
-                            try {
-                                String ragMetadataJson = buildRagMetadataJson(
-                                        finalDocs, finalRetrievalDurationMs);
-                                saveTurn(sessionId, request.getKnowledgeBaseId(), userId, request.getMessage(),
-                                        fullAnswer, ragMetadataJson);
-                                log.info("流式问答完成并落库: sessionId={}, userId={}, answerLength={}, retrievedDocs={}",
-                                        sessionId, userId, fullAnswer.length(), finalDocs.size());
-                            } catch (Exception e) {
-                                // 【修复 2026-06-28】不静默吞——失败时 WARN 告警
-                                log.warn("[落库告警] 流式回合持久化失败: sessionId={}, userId={}, answerLength={}",
-                                        sessionId, userId, fullAnswer.length(), e);
-                            }
-                        }).subscribeOn(Schedulers.boundedElastic()).subscribe();
+            // 构建 LLM 流式响应 flux（用 defer 延迟创建，确保 advisor 链正确初始化）
+            Flux<String> llmStream = Flux.defer(() ->
+                    chatClientBuilder.build()
+                            .prompt(prompt)
+                            .advisors(new SimpleLoggerAdvisor())
+                            .stream()
+                            .content()
+            );
+
+            // 累积器用于收集完整回答
+            StringBuilder accumulator = new StringBuilder();
+
+            // 使用 concatWith + defer 将 session-start / sources / end 与 LLM 流拼接
+            // concat 是顺序拼接：先发 start，再发 LLM chunk，最后发 sources + end
+            return Flux.concat(
+                    Flux.just(sseEvent("session-start", sessionId)),
+                    Flux.defer(() ->
+                            llmStream
+                                    .map(chunk -> {
+                                        accumulator.append(chunk);
+                                        return sseEvent("chunk", chunk);
+                                    })
+                                    .doOnComplete(() -> {
+                                        // LLM 流完成后，异步落库
+                                        Mono.fromRunnable(() -> {
+                                            try {
+                                                String ragMetadataJson = buildRagMetadataJson(
+                                                        finalDocs, finalRetrievalDurationMs);
+                                                saveTurn(sessionId, request.getKnowledgeBaseId(), userId,
+                                                        request.getMessage(), accumulator.toString(), ragMetadataJson);
+                                                log.info("流式问答完成并落库: sessionId={}, userId={}, answerLength={}, retrievedDocs={}",
+                                                        sessionId, userId, accumulator.length(), finalDocs.size());
+                                            } catch (Exception e) {
+                                                log.warn("[落库告警] 流式回合持久化失败: sessionId={}, userId={}, answerLength={}",
+                                                        sessionId, userId, accumulator.length(), e);
+                                            }
+                                        }).subscribeOn(Schedulers.boundedElastic()).subscribe();
+                                    })
+                    ),
+                    Flux.defer(() -> {
+                        List<SourceRef> sources = buildSourceRefs(finalDocs);
+                        return Flux.just(
+                                sseEvent("sources", serializeSources(sources)),
+                                sseEvent("end", "")
+                        );
                     })
-                    .doOnError(e -> {
-                        log.error("流式响应错误: sessionId={}", sessionId, e);
-                        try {
-                            saveTurn(sessionId, request.getKnowledgeBaseId(), userId, request.getMessage(),
-                                    "抱歉，AI服务暂时不可用，请稍后重试。",
-                                    buildRagMetadataJson(finalDocs, finalRetrievalDurationMs));
-                        } catch (Exception ex) {
-                            log.warn("[落库告警] 流式错误提示持久化失败: sessionId={}, userId={}",
-                                    sessionId, userId, ex);
-                        }
-                    });
+            );
         } catch (Exception e) {
             log.error("流式问答失败: sessionId={}", sessionId, e);
             String errorMsg = "抱歉，AI服务暂时不可用，请稍后重试。";
@@ -220,7 +286,32 @@ public class ChatService {
                 log.warn("[落库告警] 流式外层错误提示持久化失败: sessionId={}, userId={}",
                         sessionId, userId, ex);
             }
-            return Flux.just(errorMsg);
+            return Flux.just(sseEvent("chunk", errorMsg), sseEvent("end", ""));
+        }
+    }
+
+    /**
+     * 【2026-06-29 增量 P0-01】构造一个 SSE 事件
+     */
+    private ServerSentEvent<String> sseEvent(String eventName, String data) {
+        return ServerSentEvent.<String>builder()
+                .event(eventName)
+                .data(data == null ? "" : data)
+                .build();
+    }
+
+    /**
+     * 【2026-06-29 增量 P0-01】把 SourceRef 列表序列化为 JSON 字符串
+     */
+    private String serializeSources(List<SourceRef> sources) {
+        if (sources == null || sources.isEmpty()) {
+            return "[]";
+        }
+        try {
+            return objectMapper.writeValueAsString(sources);
+        } catch (JsonProcessingException e) {
+            log.warn("SourceRef 列表序列化失败: {}", e.getMessage());
+            return "[]";
         }
     }
 
@@ -300,6 +391,64 @@ public class ChatService {
     }
 
     /**
+     * 【2026-06-29 增量 P0-01】把 RagService 召回结果转换为前端可消费的 SourceRef 列表
+     *
+     * 字段映射：
+     *   - documentId : 从 source "docId_chunkIndex" 中提取 docId
+     *   - fileName   : 直接用 RagService 已关联好的 fileName
+     *   - chunkIndex : 从 source 末尾解析 "_N"
+     *   - snippet    : content 前 N 字符 + 省略号（N 由 sourceSnippetLength 配置）
+     *   - score      : retrieval / rerank 分数
+     *
+     * @param retrievedDocs 检索结果
+     * @return SourceRef 列表；空输入返回空列表
+     */
+    private List<SourceRef> buildSourceRefs(List<RagService.RetrievalResult> retrievedDocs) {
+        if (retrievedDocs == null || retrievedDocs.isEmpty()) {
+            return List.of();
+        }
+        List<SourceRef> refs = new java.util.ArrayList<>(retrievedDocs.size());
+        for (RagService.RetrievalResult r : retrievedDocs) {
+            // source 格式："docId_chunkIndex"，按最后一个 "_" 切分
+            String source = r.source();
+            String documentId;
+            Integer chunkIndex;
+            int lastUnderscore = source.lastIndexOf('_');
+            if (lastUnderscore > 0 && lastUnderscore < source.length() - 1) {
+                documentId = source.substring(0, lastUnderscore);
+                try {
+                    chunkIndex = Integer.parseInt(source.substring(lastUnderscore + 1));
+                } catch (NumberFormatException e) {
+                    chunkIndex = null;
+                }
+            } else {
+                documentId = source;
+                chunkIndex = null;
+            }
+
+            // snippet：截取前 N 字符 + 省略号（如果有截断）
+            String snippet = null;
+            String content = r.content();
+            if (content != null) {
+                if (content.length() > sourceSnippetLength) {
+                    snippet = content.substring(0, sourceSnippetLength) + "…";
+                } else {
+                    snippet = content;
+                }
+            }
+
+            refs.add(SourceRef.builder()
+                    .documentId(documentId)
+                    .fileName(r.fileName())
+                    .chunkIndex(chunkIndex)
+                    .snippet(snippet)
+                    .score(r.score())
+                    .build());
+        }
+        return refs;
+    }
+
+    /**
      * 构建上下文字符串（与RagService相同）
      */
     private String buildContext(List<RagService.RetrievalResult> results) {
@@ -314,7 +463,10 @@ public class ChatService {
     }
 
     /**
-     * 构建提示词（与RagService保持一致）
+     * 构建提示词（V1：无历史）
+     *
+     * 【2026-06-29 P0-02】已重构为带历史版本（buildPromptWithHistory）。
+     * 保留此方法作为兼容 / 单轮问答 fallback。
      */
     private String buildPrompt(String context, String question) {
         return """
@@ -335,6 +487,58 @@ public class ChatService {
 
             === 回答 ===
             """.formatted(context, question);
+    }
+
+    /**
+     * 【2026-06-29 增量 P0-02】带对话历史的提示词构建
+     *
+     * 与 RagService.buildPromptWithHistory 逻辑相同（流式路径独立复制一份，
+     * 因为流式需要 context 构建与 RagService 分离的 prompt）。
+     *
+     * 为什么不抽公共方法：保持 RagService 与 ChatService 的低耦合。
+     * 双方各自实现相同逻辑的成本 < 引入共享抽象的复杂度。
+     */
+    private String buildPromptWithHistory(String context, java.util.List<com.ragqa.dto.ChatMessage> history, String currentMessage) {
+        StringBuilder historySection = new StringBuilder();
+        if (history == null || history.isEmpty()) {
+            historySection.append("（这是新对话，无上文）");
+        } else {
+            // 取最近 6 条消息（默认 3 轮 user+assistant）
+            int n = Math.min(history.size(), 6);
+            int start = history.size() - n;
+            for (int i = start; i < history.size(); i++) {
+                com.ragqa.dto.ChatMessage m = history.get(i);
+                String roleLabel = "user".equals(m.getRole()) ? "用户" : "助手";
+                String content = m.getContent() == null ? "" : m.getContent();
+                if (content.length() > 500) {
+                    content = content.substring(0, 500) + "…";
+                }
+                historySection.append(roleLabel).append(": ").append(content).append("\n");
+            }
+        }
+
+        return """
+            你是一个专业的智能问答助手，擅长从提供的文档中准确提取信息并清晰回答用户问题。
+
+            === 对话历史（最近 %d 轮）===
+            %s
+
+            === 参考文档 ===
+            %s
+
+            === 用户当前问题 ===
+            %s
+
+            === 回答要求 ===
+            1. **优先结合对话历史理解指代**：用户当前问题中的"它/那个/前一条"等代词，先在历史中找到指代对象
+            2. 只基于参考文档内容回答，不要编造信息
+            3. 如果文档中没有相关信息，回答："抱歉，知识库中没有找到与您问题相关的内容。"
+            4. 引用文档时使用【文档X】标注来源
+            5. 回答结构：先给出结论，再引用证据，最后补充说明（如有）
+            6. 对于复杂问题，用分点或编号的方式回答
+
+            === 回答 ===
+            """.formatted(3, historySection.toString(), context, currentMessage);
     }
 
     /**

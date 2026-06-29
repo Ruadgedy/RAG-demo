@@ -21,6 +21,12 @@
       <div v-if="!msg.content && streaming" class="msg__loading">
         <span class="loading-dots"><span /><span /><span /></span>
       </div>
+      <!-- 【2026-06-29 增量 P0-01】渲染来源引用卡片（仅 AI 消息且有 sources 时） -->
+      <SourceCard
+        v-if="msg.sources && msg.sources.length > 0 && msg.content"
+        :sources="msg.sources"
+        :default-open="false"
+      />
     </template>
   </div>
 </template>
@@ -29,6 +35,7 @@
 import { computed } from 'vue'
 import { marked } from 'marked'
 import { Sparkles } from 'lucide-vue-next'
+import SourceCard from './SourceCard.vue'
 
 const props = defineProps({
   msg: { type: Object, required: true },
