@@ -36,6 +36,9 @@ jacoco/
 # Docker
 .dockerignore
 
+# Claude Code local state
+.claude/
+
 # Java
 *.class
 *.jar

@@ -1,0 +1,207 @@
+/*
+ * doubao.css — 页面级结构 + 通用动画
+ * 组件专属样式仍放在各自 <style scoped> 中；这里只放跨组件共享的 reset/动画。
+ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  background: var(--bg-page);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+input, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+input:focus, textarea:focus {
+  outline: none;
+}
+
+/* ========== 文本渐变工具类（"智能助手" 这类强调） ========== */
+.text-gradient {
+  background: var(--gradient-brand);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* ========== 渐变背景按钮基础 ========== */
+.btn-gradient {
+  background: var(--gradient-brand);
+  color: var(--text-on-brand);
+  border: none;
+  transition: transform var(--t-fast), box-shadow var(--t-normal), filter var(--t-fast);
+}
+
+.btn-gradient:hover:not(:disabled) {
+  filter: brightness(1.05);
+  box-shadow: var(--shadow-brand);
+}
+
+.btn-gradient:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn-gradient:disabled {
+  filter: grayscale(0.4) brightness(1.1);
+  opacity: 0.6;
+}
+
+/* ========== 滚动条美化 ========== */
+.scroll-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: rgba(20, 21, 26, 0.12);
+  border-radius: var(--r-pill);
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(20, 21, 26, 0.24);
+}
+
+/* ========== 通用动画 ========== */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse-dot {
+  0%, 60%, 100% { opacity: 0.2; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.anim-fade-in  { animation: fade-in var(--t-slow) both; }
+.anim-fade-up  { animation: fade-up var(--t-slow) both; }
+
+/* 进入动画辅助：配合 v-for 的 TransitionGroup，给每条消息淡入 */
+.message-enter-from { opacity: 0; transform: translateY(6px); }
+.message-enter-active {
+  transition: opacity var(--t-normal), transform var(--t-normal);
+}
+.message-enter-to { opacity: 1; transform: translateY(0); }
+
+/* ========== Loading 三点跳动 ========== */
+.loading-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+.loading-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  animation: pulse-dot 1.4s infinite ease-in-out both;
+}
+.loading-dots span:nth-child(2) { animation-delay: 0.16s; }
+.loading-dots span:nth-child(3) { animation-delay: 0.32s; }
+
+/* ========== Markdown 内容（MessageBubble 内） ========== */
+.md-body {
+  line-height: 1.7;
+  word-wrap: break-word;
+  color: var(--text-primary);
+}
+.md-body p { margin: 0 0 8px; }
+.md-body p:last-child { margin-bottom: 0; }
+.md-body h1, .md-body h2, .md-body h3 {
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 14px 0 8px;
+}
+.md-body h1 { font-size: var(--text-xl); }
+.md-body h2 { font-size: var(--text-lg); }
+.md-body h3 { font-size: var(--text-md); }
+.md-body ul, .md-body ol { padding-left: 22px; margin: 6px 0; }
+.md-body li { margin: 2px 0; }
+.md-body code {
+  background: var(--bg-card);
+  padding: 2px 6px;
+  border-radius: var(--r-xs);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--brand-deep);
+}
+.md-body pre {
+  background: #1F2128;
+  color: #E5E7EB;
+  padding: 14px 16px;
+  border-radius: var(--r-md);
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  margin: 10px 0;
+}
+.md-body pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.md-body blockquote {
+  margin: 8px 0;
+  padding: 6px 14px;
+  border-left: 3px solid var(--brand);
+  background: var(--brand-soft);
+  color: var(--text-secondary);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.md-body a {
+  color: var(--brand);
+  text-decoration: none;
+}
+.md-body a:hover { text-decoration: underline; }
+.md-body table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: var(--text-sm);
+}
+.md-body th, .md-body td {
+  border: 1px solid var(--border-subtle);
+  padding: 6px 10px;
+  text-align: left;
+}
+.md-body th {
+  background: var(--bg-card);
+  font-weight: 600;
+}

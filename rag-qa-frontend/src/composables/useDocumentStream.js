@@ -27,7 +27,7 @@ const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000, 30000]  // 指数退避
 const FALLBACK_POLL_INTERVAL = 3000   // SSE 失败时降级轮询间隔
 const MAX_RECONNECTS_BEFORE_FALLBACK = 6  // 6 次重连失败后启用轮询
 
-export function useDocumentStream(kbIdRef, documentsRef, options = {}) {
+export function useDocumentStream(kbRefOrIdRef, documentsRef, options = {}) {
   const {
     endpoint = '/api/knowledge-bases',
   } = options
@@ -37,6 +37,19 @@ export function useDocumentStream(kbIdRef, documentsRef, options = {}) {
   let reconnectAttempt = 0
   let stopped = false
   let fallbackActive = false
+
+  /**
+   * 把传入的 KB 对象 ref（或 KB id ref / getter）统一提取成 ID
+   * - ref(KB 对象) → kbRef.value.id
+   * - ref(number/string id) → 直接返回
+   * - getter → 调用后同上
+   */
+  const resolveKbId = () => {
+    const v = typeof kbRefOrIdRef === 'function' ? kbRefOrIdRef() : unref(kbRefOrIdRef)
+    if (v == null) return null
+    if (typeof v === 'object') return v.id ?? null
+    return v
+  }
 
   /**
    * 把事件合并到 documents 列表（按 id 覆盖或追加）。
@@ -70,7 +83,7 @@ export function useDocumentStream(kbIdRef, documentsRef, options = {}) {
    * 启动 EventSource 订阅。
    */
   const startSSE = () => {
-    const kbId = unref(kbIdRef)
+    const kbId = resolveKbId()
     if (!kbId || stopped) return
 
     const token = localStorage.getItem('token') || ''
@@ -143,7 +156,7 @@ export function useDocumentStream(kbIdRef, documentsRef, options = {}) {
     console.warn('[useDocumentStream] SSE failed, falling back to polling')
 
     const poll = async () => {
-      const kbId = unref(kbIdRef)
+      const kbId = resolveKbId()
       if (!kbId || stopped) return
       try {
         const res = await axios.get(`${endpoint}/${kbId}/documents`, {
