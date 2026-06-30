@@ -130,19 +130,40 @@ public class DocumentService {
 
         Optional<Document> existingByHash = documentRepository.findByKnowledgeBaseIdAndFileHash(knowledgeBaseId, fileHash);
         if (existingByHash.isPresent()) {
-            // 【2026-06-30 修复】哈希冲突时也要清理文件
-            cleanupPartialUpload(filePath);
-            throw new IllegalArgumentException(
-                "文件内容已存在（哈希 " + fileHash.substring(0, 8) + "...），重复上传将浪费 embedding 算力。"
-                + "如需替换请先删除旧文档: " + existingByHash.get().getFileName());
+            Document existing = existingByHash.get();
+            // 【2026-06-30 修复】根据 status 判断是否是残留记录
+            // FAILED/UPLOAD_FAILED 说明是之前上传/处理失败的残留，可以清理后重新上传
+            if (existing.getStatus() == Document.DocumentStatus.UPLOAD_FAILED
+                || existing.getStatus() == Document.DocumentStatus.FAILED) {
+                log.warn("检测到残留记录（哈希 {}，状态 {}），先删除后重新上传",
+                        fileHash.substring(0, 8), existing.getStatus());
+                documentRepository.delete(existing);
+                // 继续执行上传流程...
+            } else {
+                // 正常记录（处理中或已完成）→ 真正的重复
+                cleanupPartialUpload(filePath);
+                throw new IllegalArgumentException(
+                        "文件内容已存在（哈希 " + fileHash.substring(0, 8) + "...），重复上传将浪费 embedding 算力。"
+                        + "如需替换请先删除旧文档: " + existingByHash.get().getFileName());
+            }
         }
 
         // 第一层校验：按文件名再查一次（保护老的逻辑，未来可以考虑去除）
         Optional<Document> existingDoc = documentRepository.findByKnowledgeBaseIdAndFileName(knowledgeBaseId, fileName);
         if (existingDoc.isPresent()) {
-            // 【2026-06-30 修复】文件名冲突时也要清理文件
-            cleanupPartialUpload(filePath);
-            throw new IllegalArgumentException("文件名已存在: " + fileName);
+            Document existing = existingDoc.get();
+            // 【2026-06-30 修复】文件名冲突时也检查 status
+            if (existing.getStatus() == Document.DocumentStatus.UPLOAD_FAILED
+                || existing.getStatus() == Document.DocumentStatus.FAILED) {
+                log.warn("检测到文件名冲突的残留记录（文件名 {}，状态 {}），先删除后重新上传",
+                        fileName, existing.getStatus());
+                documentRepository.delete(existing);
+                // 继续执行上传流程...
+            } else {
+                // 正常记录 → 真正的文件名重复
+                cleanupPartialUpload(filePath);
+                throw new IllegalArgumentException("文件名已存在: " + fileName);
+            }
         }
 
         // 创建文档记录
