@@ -81,12 +81,28 @@ public class DocumentController {
             @ApiResponse(responseCode = "404", description = "知识库不存在")
     })
     @PostMapping("/knowledge-bases/{kbId}/documents")
-    public ResponseEntity<Document> uploadDocument(
+    public ResponseEntity<?> uploadDocument(
             @Parameter(description = "知识库ID") @PathVariable UUID kbId,
-            @Parameter(description = "上传的文件") @RequestParam("file") MultipartFile file) throws Exception {
-        Document doc = documentService.uploadDocument(kbId, file);
-        return ResponseEntity.ok(doc);
+            @Parameter(description = "上传的文件") @RequestParam("file") MultipartFile file) {
+        try {
+            Document doc = documentService.uploadDocument(kbId, file);
+            return ResponseEntity.ok(doc);
+        } catch (IllegalArgumentException e) {
+            // 【2026-06-30 修复】返回友好的错误信息给前端
+            log.warn("文档上传失败: {}", e.getMessage());
+            return ResponseEntity.badRequest()
+                    .body(new ErrorResponse("UPLOAD_FAILED", e.getMessage()));
+        } catch (Exception e) {
+            log.error("文档上传异常: {}", e.getMessage(), e);
+            return ResponseEntity.status(500)
+                    .body(new ErrorResponse("INTERNAL_ERROR", "服务器内部错误: " + e.getMessage()));
+        }
     }
+
+    /**
+     * 【2026-06-30 增量】上传错误响应体
+     */
+    public record ErrorResponse(String code, String message) {}
 
     @Operation(summary = "获取文档列表", description = "获取指定知识库中的所有文档")
     @ApiResponses(value = {

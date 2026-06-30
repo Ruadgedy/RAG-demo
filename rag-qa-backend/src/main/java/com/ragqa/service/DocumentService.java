@@ -98,18 +98,40 @@ public class DocumentService {
 
         Files.createDirectories(uploadPath);
 
+        // 【2026-06-30 修复】检查目标文件是否已存在（残留文件）
+        // 如果已存在，说明是上次上传失败留下的，需要先删除
+        if (Files.exists(filePath)) {
+            log.warn("检测到残留文件 {}，先清理后重新上传", filePath);
+            try {
+                Files.delete(filePath);
+            } catch (IOException e) {
+                throw new IllegalArgumentException("清理残留文件失败: " + e.getMessage());
+            }
+        }
+
         // 流式保存文件到磁盘（不占用堆内存）
         try {
             Files.copy(file.getInputStream(), filePath);
         } catch (IOException e) {
+            // 【2026-06-30 修复】上传失败时清理残留文件
+            cleanupPartialUpload(filePath);
             throw new IllegalArgumentException("文件保存失败: " + e.getMessage());
         }
 
         // 流式计算 SHA-256（从磁盘文件读取，不占用堆内存）
-        String fileHash = sha256HexStream(filePath);
+        String fileHash;
+        try {
+            fileHash = sha256HexStream(filePath);
+        } catch (Exception e) {
+            // 【2026-06-30 修复】计算哈希失败时清理残留文件
+            cleanupPartialUpload(filePath);
+            throw new IllegalArgumentException("文件哈希计算失败: " + e.getMessage());
+        }
 
         Optional<Document> existingByHash = documentRepository.findByKnowledgeBaseIdAndFileHash(knowledgeBaseId, fileHash);
         if (existingByHash.isPresent()) {
+            // 【2026-06-30 修复】哈希冲突时也要清理文件
+            cleanupPartialUpload(filePath);
             throw new IllegalArgumentException(
                 "文件内容已存在（哈希 " + fileHash.substring(0, 8) + "...），重复上传将浪费 embedding 算力。"
                 + "如需替换请先删除旧文档: " + existingByHash.get().getFileName());
@@ -118,6 +140,8 @@ public class DocumentService {
         // 第一层校验：按文件名再查一次（保护老的逻辑，未来可以考虑去除）
         Optional<Document> existingDoc = documentRepository.findByKnowledgeBaseIdAndFileName(knowledgeBaseId, fileName);
         if (existingDoc.isPresent()) {
+            // 【2026-06-30 修复】文件名冲突时也要清理文件
+            cleanupPartialUpload(filePath);
             throw new IllegalArgumentException("文件名已存在: " + fileName);
         }
 
@@ -254,6 +278,25 @@ public class DocumentService {
             throw new RuntimeException("SHA-256 算法不可用", e);
         } catch (IOException e) {
             throw new RuntimeException("计算文件哈希失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 【2026-06-30 修复】清理部分上传的文件
+     *
+     * 上传过程中任何一步失败（文件保存/哈希计算/哈希冲突），
+     * 都需要清理已写入的文件，避免残留文件阻塞后续上传。
+     *
+     * @param filePath 可能残留的文件路径
+     */
+    private void cleanupPartialUpload(Path filePath) {
+        if (filePath != null && Files.exists(filePath)) {
+            try {
+                Files.delete(filePath);
+                log.info("已清理部分上传文件: {}", filePath);
+            } catch (IOException e) {
+                log.warn("清理部分上传文件失败: {}, err={}", filePath, e.getMessage());
+            }
         }
     }
 }
