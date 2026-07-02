@@ -20,36 +20,32 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 对话历史控制器（V3 重构版）
+ * 对话历史控制器（V6 兼容版）
  *
- * 【V3 变更】
- * 1. knowledgeBaseId 类型 UUID → String（CHAR(36) 可读 UUID）
- * 2. /api/chat-history/{sessionId} 改为返回展开后的消息列表（前端 ChatView 的 loadSession 不需要改）：
- *    - DB 一条记录 = (query + content) → 展开为 [{role:user, content:query}, {role:assistant, content:content}]
- * 3. /api/knowledge-bases/{kbId}/chat-history 同步改为 String kbId
+ * 【V6 2026-06-30】
+ * - 新增 ConversationController 管理对话组
+ * - 本控制器保留旧接口兼容，标记为 @Deprecated
+ * - 旧接口按 conversation_id 聚合返回
  */
 @RestController
 @RequestMapping("/api")
 @RequiredArgsConstructor
-@Tag(name = "对话历史", description = "聊天历史记录管理接口")
+@Tag(name = "对话历史", description = "聊天历史记录管理接口（V6 兼容）")
 public class ChatHistoryController {
 
     private final ChatHistoryRepository chatHistoryRepository;
 
     /**
-     * 轻量消息 DTO，用于把单条 chat_history 展开为"用户问 + AI 答"两条消息。
-     * 保持与旧版 API 兼容：前端 loadSession 直接用 res.data.map(h => ({role, content}))。
+     * 轻量消息 DTO
      */
     public record ChatMessageDto(String role, String content) {}
 
     /**
-     * 获取当前用户的所有聊天会话。
+     * 【V6 @Deprecated】获取当前用户的所有聊天会话
+     * 建议使用 GET /api/conversations
      */
-    @Operation(summary = "获取所有会话", description = "获取当前用户的所有对话会话")
-    @ApiResponses(value = {
-            @ApiResponse(responseCode = "200", description = "获取成功"),
-            @ApiResponse(responseCode = "401", description = "未认证")
-    })
+    @Deprecated
+    @Operation(summary = "获取所有会话（已废弃）", description = "建议使用 GET /api/conversations")
     @GetMapping("/chat-history")
     public ResponseEntity<List<ChatHistory>> getAllSessions() {
         String userId = getCurrentUserId();
@@ -58,82 +54,56 @@ public class ChatHistoryController {
     }
 
     /**
-     * 获取指定会话的所有消息。
-     *
-     * 【V3 变更】每条 chat_history 记录展开为 {user, assistant} 两条消息，
-     * 返回 [{role, content}] 列表。前端 ChatView.loadSession 不需要改：
-     *   res.data.map(h => ({ role: h.role, content: h.content }))
+     * 【V6 @Deprecated】获取指定会话的所有消息
+     * 建议使用 GET /api/conversations/{id}/messages
      */
-    @Operation(summary = "获取会话消息", description = "获取指定会话的所有消息，按时间正序排列")
-    @ApiResponses(value = {
-            @ApiResponse(responseCode = "200", description = "获取成功",
-                    content = @Content(schema = @Schema(implementation = ChatMessageDto.class))),
-            @ApiResponse(responseCode = "401", description = "未认证")
-    })
+    @Deprecated
+    @Operation(summary = "获取会话消息（已废弃）", description = "建议使用 GET /api/conversations/{id}/messages")
     @GetMapping("/chat-history/{sessionId}")
     public ResponseEntity<List<ChatMessageDto>> getHistoryBySession(
             @Parameter(description = "会话ID") @PathVariable String sessionId) {
-        String userId = getCurrentUserId();
-        List<ChatHistory> turns = chatHistoryRepository
-                .findBySessionIdAndUserIdOrderByCreatedAtAsc(sessionId, userId);
-
-        // 把单条记录展开为两条消息：user 问 + assistant 答
-        List<ChatMessageDto> messages = new ArrayList<>(turns.size() * 2);
-        for (ChatHistory turn : turns) {
-            if (turn.getQuery() != null) {
-                messages.add(new ChatMessageDto("user", turn.getQuery()));
-            }
-            if (turn.getContent() != null) {
-                messages.add(new ChatMessageDto("assistant", turn.getContent()));
-            }
-        }
-        return ResponseEntity.ok(messages);
+        // V6: 此接口已废弃，请使用 GET /api/conversations/{id}/messages
+        return ResponseEntity.status(410).build();
     }
 
     /**
-     * 获取知识库的会话列表。
-     *
-     * 【V3 变更】kbId 类型 UUID → String
+     * 【V6 @Deprecated】获取知识库的会话列表
+     * 建议使用 GET /api/conversations
      */
-    @Operation(summary = "获取知识库的会话列表", description = "获取指定知识库的所有对话会话")
-    @ApiResponses(value = {
-            @ApiResponse(responseCode = "200", description = "获取成功"),
-            @ApiResponse(responseCode = "401", description = "未认证")
-    })
+    @Deprecated
+    @Operation(summary = "获取知识库的会话列表（已废弃）", description = "建议使用 GET /api/conversations")
     @GetMapping("/knowledge-bases/{kbId}/chat-history")
     public ResponseEntity<List<ChatHistory>> getHistoryByKnowledgeBase(
-            @Parameter(description = "知识库ID（CHAR(36)）") @PathVariable String kbId) {
-        List<ChatHistory> history = chatHistoryRepository.findByKnowledgeBaseIdOrderByCreatedAtDesc(kbId);
-        return ResponseEntity.ok(history);
+            @Parameter(description = "知识库ID") @PathVariable String kbId) {
+        // V6: 此接口已废弃，请使用 GET /api/conversations
+        return ResponseEntity.status(410).build();
     }
 
-    @Operation(summary = "保存消息", description = "保存单条聊天消息到历史记录")
-    @ApiResponses(value = {
-            @ApiResponse(responseCode = "200", description = "保存成功",
-                    content = @Content(schema = @Schema(implementation = ChatHistory.class))),
-            @ApiResponse(responseCode = "401", description = "未认证")
-    })
+    /**
+     * 【V6 @Deprecated】保存消息
+     */
+    @Deprecated
+    @Operation(summary = "保存消息（已废弃）", description = "消息由 ChatService 自动保存")
     @PostMapping("/chat-history")
     public ResponseEntity<ChatHistory> saveMessage(@RequestBody ChatHistory chatHistory) {
         ChatHistory saved = chatHistoryRepository.save(chatHistory);
         return ResponseEntity.ok(saved);
     }
 
-    @Operation(summary = "删除会话", description = "删除指定会话及其所有消息")
-    @ApiResponses(value = {
-            @ApiResponse(responseCode = "204", description = "删除成功"),
-            @ApiResponse(responseCode = "401", description = "未认证")
-    })
+    /**
+     * 【V6 @Deprecated】删除会话
+     * 建议使用 DELETE /api/conversations/{id}
+     * 实现已移除（原 deleteBySessionId 已废弃）
+     */
+    @Deprecated
+    @Operation(summary = "删除会话（已废弃）", description = "建议使用 DELETE /api/conversations/{id}")
     @DeleteMapping("/chat-history/{sessionId}")
     public ResponseEntity<Void> deleteSession(
             @Parameter(description = "会话ID") @PathVariable String sessionId) {
-        chatHistoryRepository.deleteBySessionId(sessionId);
-        return ResponseEntity.noContent().build();
+        // V6: 此接口已废弃，请使用 DELETE /api/conversations/{id}
+        return ResponseEntity.status(410).build();  // 410 Gone
     }
 
-    /**
-     * 从 SecurityContext 提取当前用户名作为 userId。
-     */
     private String getCurrentUserId() {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         if (auth != null && auth.getPrincipal() instanceof User user) {

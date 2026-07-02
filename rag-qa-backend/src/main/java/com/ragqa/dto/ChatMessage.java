@@ -1,5 +1,6 @@
 package com.ragqa.dto;
 
+import lombok.AllArgsConstructor;
 import lombok.Data;
 
 /**
@@ -12,6 +13,7 @@ import lombok.Data;
  * - content: 消息内容
  */
 @Data
+@AllArgsConstructor
 public class ChatMessage {
     /** 消息角色：user 或 assistant */
     private String role;

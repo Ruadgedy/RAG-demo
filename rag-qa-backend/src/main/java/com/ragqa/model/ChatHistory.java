@@ -7,26 +7,27 @@ import java.time.LocalDateTime;
 import java.util.UUID;
 
 /**
- * 对话历史实体类（V3 重构版）
+ * 对话历史实体类（V6 重构版）
  *
  * 对应数据库表：chat_history
  *
- * 【V3 重大变更 2026-06-28】
- * 1. 一个会话回合 = 一条记录：query（用户提问） + content（AI 回答） + rag_metadata（RAG 召回元数据）
- *    → 替代旧版"user/assistant 各一条 + role 字段"
- * 2. id / knowledge_base_id 改用 CHAR(36) 可读 UUID（Java 端用 String 承载）
- * 3. user_id 收紧到 varchar(64)
- * 4. 新增 rag_metadata JSON 字段（RAG 召回埋点：召回文档数、文档ID列表、召回片段数、检索耗时）
+ * 【V6 重大变更 2026-06-30】
+ * 重构为"对话组 + 单次问答"模型：
+ * - conversation：对话组，一次完整的多轮对话
+ * - chat_history：单次问答（用户提问+AI回答），归属于某个 conversation
  *
  * 字段说明：
  * - id: 主键，UUID
  * - userId: 所属用户 username（按用户隔离聊天历史）
- * - sessionId: 同一会话的多轮回合共享同一个 sessionId
- * - knowledgeBaseId: 所属知识库，FK → knowledge_base.id，ON DELETE SET NULL
+ * - conversationId: 所属对话组ID
+ * - chatId: 单次问答ID（UUID，用于 SSE session-start 事件）
+ * - turnIndex: 第几轮对话（0,1,2...），用于滑动窗口和排序
+ * - knowledgeBaseId: 所属知识库
  * - query: 用户提问（最长 128 字符）
  * - content: 模型完整回答（TEXT）
  * - createdAt: 创建时间
  * - ragMetadata: RAG 召回元数据（JSON 字符串）
+ * - chatMetadata: 扩展元数据（JSON 字符串，预留）
  */
 @Data
 @Entity
@@ -42,9 +43,17 @@ public class ChatHistory {
     @Column(name = "user_id", length = 64)
     private String userId;
 
-    /** 会话ID（同一会话的多轮回合共享） */
-    @Column(name = "session_id")
-    private String sessionId;
+    /** 所属对话组ID */
+    @Column(name = "conversation_id", length = 36)
+    private String conversationId;
+
+    /** 单次问答ID（UUID，用于 SSE session-start 事件） */
+    @Column(name = "chat_id", length = 36)
+    private String chatId;
+
+    /** 第几轮对话（0,1,2...），用于滑动窗口和排序 */
+    @Column(name = "turn_index")
+    private Integer turnIndex;
 
     /** 所属知识库ID（CHAR(36)） */
     @Column(name = "knowledge_base_id", columnDefinition = "CHAR(36)")
@@ -77,12 +86,25 @@ public class ChatHistory {
     private String ragMetadata;
 
     /**
+     * 扩展元数据（JSON 字符串，预留）
+     * 可用于存储 token 数量、模型名称等扩展信息
+     */
+    @Column(name = "chat_metadata", columnDefinition = "json")
+    private String chatMetadata;
+
+    /**
      * 创建前自动设置 id + createdAt
      */
     @PrePersist
     protected void onCreate() {
         if (id == null || id.isBlank()) {
             id = UUID.randomUUID().toString();
+        }
+        if (chatId == null || chatId.isBlank()) {
+            chatId = UUID.randomUUID().toString();
+        }
+        if (turnIndex == null) {
+            turnIndex = 0;
         }
         if (createdAt == null) {
             createdAt = LocalDateTime.now();
