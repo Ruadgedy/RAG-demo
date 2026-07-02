@@ -260,12 +260,12 @@ public class DocumentProcessService {
     /**
      * 【2026-06-29 P1-05】流式解析文档到临时文件
      *
-     * 使用 Tika 的 WriteOutContentHandler 限制单次写入大小，
-     * 分多次读取并追加到临时文件，避免大文本 OOM。
+     * 使用 Tika 直接解析文件到临时文件，避免大文本 OOM。
+     * Tika 的 WriteOutContentHandler 内部会处理大文件分块。
      */
     private Path streamParseToTempFile(Path filePath, UUID documentId) throws Exception {
         Path tempDirPath = Paths.get(tempDir).toAbsolutePath().normalize();
-        Files.createDirectories(tempDirPath);  // 【修复】先创建临时目录
+        Files.createDirectories(tempDirPath);
 
         Path tempFile = Files.createTempFile(
             tempDirPath,
@@ -275,48 +275,32 @@ public class DocumentProcessService {
 
         log.info("流式解析到临时文件: {}", tempFile);
 
-        try (InputStream is = Files.newInputStream(filePath);
-             TikaInputStream tis = TikaInputStream.cast(is)) {
+        try {
+            // 直接解析文件到 StringWriter
+            StringWriter writer = new StringWriter();
             AutoDetectParser parser = new AutoDetectParser();
             Metadata metadata = new Metadata();
 
-            // 使用较大但可控的写入限制（100MB），分多次读取
-            // Tika 的 WriteOutContentHandler 会抛出 WriteLimitReachedException 停止解析
-            ContentHandler handler = new WriteOutContentHandler(100 * 1024 * 1024);
-            StringWriter writer = new StringWriter();
+            // 使用 FileInputStream 解析文件
+            WriteOutContentHandler writeOutHandler = new WriteOutContentHandler(writer, 200 * 1024 * 1024);  // 200MB
+            org.apache.tika.sax.BodyContentHandler contentHandler = new org.apache.tika.sax.BodyContentHandler(writeOutHandler);
 
-            // 分块解析
-            long totalWritten = 0;
-            int part = 0;
-
-            while (true) {
-                try {
-                    handler = new WriteOutContentHandler(100 * 1024 * 1024);  // 100MB 每块
-                    writer = new StringWriter();
-                    org.apache.tika.sax.BodyContentHandler bodyHandler =
-                        new org.apache.tika.sax.BodyContentHandler(handler);
-
-                    parser.parse(tis, bodyHandler, metadata);
-                    String content = writer.toString();
-
-                    // 追加到临时文件
-                    Files.writeString(tempFile, content,
-                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-                    totalWritten += content.length();
-                    log.info("流式解析第 {} 部分完成，累计: {} chars", ++part, totalWritten);
-                    break;  // 解析完成
-
-                } catch (org.apache.tika.exception.WriteLimitReachedException e) {
-                    // 达到写入限制，保存当前内容并继续
-                    String content = writer.toString();
-                    Files.writeString(tempFile, content,
-                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-                    totalWritten += content.length();
-                    log.info("流式解析部分 {} 完成（达到写入限制），继续解析...", ++part);
-                }
+            // 使用 FileInputStream
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(filePath.toFile())) {
+                parser.parse(fis, contentHandler, metadata);
             }
 
-            log.info("流式解析完成，总计: {} chars", totalWritten);
+            String content = writer.toString();
+            log.info("解析完成，文本长度: {} chars", content.length());
+
+            // 写入临时文件
+            Files.writeString(tempFile, content);
+            return tempFile;
+
+        } catch (Exception e) {
+            log.error("流式解析失败: {}", e.getMessage());
+            // 写入错误信息到临时文件
+            Files.writeString(tempFile, "解析失败: " + e.getMessage());
             return tempFile;
         }
     }
@@ -425,8 +409,8 @@ public class DocumentProcessService {
                 docChunk.setEmbedding(Arrays.toString(embedding));
                 documentChunkRepository.save(docChunk);
 
-                // 存入 Chroma
-                chromaService.addDocument(documentId, globalIndex, chunk, embedding);
+                // 存入 Chroma（携带 knowledgeBaseId，供查询期按知识库过滤）
+                chromaService.addDocument(documentId, document.getKnowledgeBaseId(), globalIndex, chunk, embedding);
 
                 // 存入 BM25
                 String chunkId = documentId.toString() + "_" + globalIndex;
