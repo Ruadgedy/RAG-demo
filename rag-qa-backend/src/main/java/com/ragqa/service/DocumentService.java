@@ -242,6 +242,50 @@ public class DocumentService {
     }
 
     /**
+     * 重新处理文档（用于回填 knowledgeBaseId metadata 等 schema 变更）
+     *
+     * 【2026-06-30 修复多知识库串答】
+     * 背景：Chroma 切片 metadata 新增 knowledgeBaseId 字段用于查询期过滤。
+     * 老切片写入时无此字段，需要重新处理以带上 metadata。
+     *
+     * 流程：
+     * 1. 清除该文档旧的 Chroma 向量、BM25 索引、MySQL chunk 记录
+     * 2. 重置文档状态为 UPLOADING（不删 Document 记录、不删本地文件）
+     * 3. 用原始 filePath 重新触发异步处理（解析→切片→向量化→写 Chroma 带 knowledgeBaseId）
+     *
+     * @param id 文档ID
+     */
+    @Transactional
+    public void reprocessDocument(UUID id) {
+        Document doc = getDocument(id);
+
+        // 1. 清旧向量 / BM25 / chunk（保留 Document 记录与本地文件）
+        chromaService.deleteByDocumentId(id);
+        try {
+            bm25Service.removeByDocumentId(id.toString());
+        } catch (Exception e) {
+            log.warn("清理 BM25 索引失败: documentId={}, err={}", id, e.getMessage());
+        }
+        documentChunkRepository.deleteByDocumentId(id);
+
+        // 2. 重置状态
+        doc.setStatus(Document.DocumentStatus.UPLOADING);
+        doc.setProgress(0);
+        doc.setChunkCount(0);
+        doc.setErrorMessage(null);
+        doc.setProcessedAt(null);
+        documentRepository.save(doc);
+
+        // 3. 校验文件仍在，重新触发处理
+        Path filePath = Paths.get(doc.getFilePath());
+        if (!Files.exists(filePath)) {
+            throw new IllegalStateException("原始文件不存在，无法重新处理: " + doc.getFilePath());
+        }
+        log.info("重新处理文档: id={}, fileName={}, filePath={}", id, doc.getFileName(), filePath);
+        documentProcessService.processDocumentAsync(id, filePath);
+    }
+
+    /**
      * 根据文件名获取文件类型
      */
     private String getFileType(String fileName) {

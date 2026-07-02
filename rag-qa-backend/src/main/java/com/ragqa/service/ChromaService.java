@@ -203,6 +203,25 @@ public class ChromaService {
      * 使用Chroma REST API直接添加，带有预计算的embedding
      */
     public void addDocument(UUID documentId, int chunkIndex, String content, float[] embedding) {
+        addDocument(documentId, null, chunkIndex, content, embedding);
+    }
+
+    /**
+     * 添加文档切片到向量数据库（携带 knowledgeBaseId 元数据）
+     *
+     * 【2026-06-30 修复多知识库串答】
+     * 背景：Chroma collection 全局共享（rag-qa-collection），所有知识库的切片混存。
+     * 老逻辑查询时无知识库过滤，全局召回后只在 Java 端按 validDocIds 过滤，
+     * 当全局最相似的恰好都是别的知识库切片时 → validCandidates 全被滤掉 → "暂无文档"。
+     * 修复：写入时把 knowledgeBaseId 存进 metadata，查询时用 where 按知识库过滤。
+     *
+     * @param documentId       文档ID
+     * @param knowledgeBaseId  知识库ID（写入 metadata 供查询期过滤；为 null 则不写，兼容老调用方）
+     * @param chunkIndex       切片索引
+     * @param content          切片文本
+     * @param embedding        预计算向量
+     */
+    public void addDocument(UUID documentId, UUID knowledgeBaseId, int chunkIndex, String content, float[] embedding) {
         String docId = documentId.toString() + "_" + chunkIndex;
 
         try {
@@ -211,6 +230,7 @@ public class ChromaService {
 
             Map<String, Object> metadata = new HashMap<>();
             metadata.put("documentId", documentId.toString());
+            metadata.put("knowledgeBaseId", knowledgeBaseId != null ? knowledgeBaseId.toString() : null);
             metadata.put("chunkIndex", chunkIndex);
 
             Map<String, Object> requestBody = new LinkedHashMap<>();
@@ -262,6 +282,20 @@ public class ChromaService {
      * @return SearchResult 列表，score 字段为余弦相似度（范围 [-1, 1]，越接近 1 越相似）
      */
     public List<SearchResult> similaritySearch(String query, int topK) {
+        return similaritySearch(query, null, topK);
+    }
+
+    /**
+     * 相似度检索（按知识库过滤）
+     *
+     * 【2026-06-30 修复多知识库串答】
+     * knowledgeBaseId 非 null 时，请求体加 where={knowledgeBaseId}，让 Chroma 只在该
+     * 知识库的切片中召回，避免全局召回命中别的知识库后又被 Java 端滤空。
+     *
+     * 注意：where 仅对 metadata 中带 knowledgeBaseId 的切片生效。老切片（写入时未带此字段）
+     * 不会被命中，故需配合回填（见 rag-qa-backend 回填脚本/重建 collection）。
+     */
+    public List<SearchResult> similaritySearch(String query, UUID knowledgeBaseId, int topK) {
         try {
             float[] queryEmbedding = embeddingService.embed(query);
 
@@ -277,6 +311,12 @@ public class ChromaService {
             Map<String, Object> requestBody = new LinkedHashMap<>();
             requestBody.put("query_embeddings", List.of(queryEmbedding));
             requestBody.put("n_results", topK);
+            // 按知识库过滤，避免跨知识库串答
+            if (knowledgeBaseId != null) {
+                Map<String, Object> where = new HashMap<>();
+                where.put("knowledgeBaseId", knowledgeBaseId.toString());
+                requestBody.put("where", where);
+            }
             // 关键：include 必须含 "embeddings"，否则后续 cosine 计算拿不到存储向量
             requestBody.put("include", List.of("documents", "metadatas", "distances", "embeddings"));
 
@@ -324,7 +364,11 @@ public class ChromaService {
             return results;
 
         } catch (Exception e) {
-            log.error("Chroma检索异常: {}", e.getMessage());
+            // 【诊断】注意：这里吞掉异常返回空，会导致 RagService.retrieve 走 candidates.isEmpty() 分支，
+            // 且 RagService 的 try/catch fallback 永不触发（因为本方法不抛异常）。
+            // 看到此日志说明 Chroma 侧异常，需排查连接/配置/collection 状态。
+            log.error("Chroma检索异常（返回空，将导致上层提示\"该知识库暂无文档\"）: query='{}', topK={}, err={}",
+                    query, topK, e.getMessage());
             return Collections.emptyList();
         }
     }

@@ -14,6 +14,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 
@@ -68,6 +70,8 @@ public class ChatController {
     })
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> streamChat(@Valid @RequestBody ChatRequest request) {
-        return chatService.streamChat(request);
+        // 捕获当前认证信息，避免 Tomcat 异步分发后 SecurityContext 丢失
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        return chatService.streamChat(request, auth);
     }
 }

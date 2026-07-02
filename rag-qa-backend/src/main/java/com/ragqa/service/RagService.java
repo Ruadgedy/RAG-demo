@@ -214,9 +214,13 @@ public class RagService {
             int fetchSize = rerankService.isEnabled()
                     ? Math.max(candidatesTopK, TOP_K)  // 启用 rerank 时多召一些
                     : TOP_K;                             // 未启用则少召节省时间
-            List<ChromaService.SearchResult> candidates = chromaService.similaritySearch(query, fetchSize);
+            // 按知识库过滤召回，避免跨知识库串答（依赖切片 metadata 带 knowledgeBaseId）
+            List<ChromaService.SearchResult> candidates = chromaService.similaritySearch(query, knowledgeBaseId, fetchSize);
 
             if (candidates.isEmpty()) {
+                // 【诊断】Chroma 正常返回但无任何召回。可能原因：collection 为空、
+                // 连接异常被 similaritySearch 内部吞掉返回空、或 query embedding 命中 0 条。
+                log.warn("Chroma 召回为空: query='{}', kbId={}, fetchSize={}", query, knowledgeBaseId, fetchSize);
                 return Collections.emptyList();
             }
 
@@ -242,6 +246,12 @@ public class RagService {
                     .collect(Collectors.toList());
 
             if (validCandidates.isEmpty()) {
+                // 【诊断】Chroma 召回了候选，但没有一条属于当前知识库的 COMPLETED 文档。
+                // 可能原因：Chroma collection 全局共享、命中的都是其他知识库的切片；
+                // 或本知识库文档状态非 COMPLETED（被 recovery scheduler 置 FAILED 等）。
+                log.warn("Chroma 召回 {} 条但无一条属于当前知识库 COMPLETED 文档: query='{}', kbId={}, validDocIds={}, 命中 documentIds={}",
+                        candidates.size(), query, knowledgeBaseId, validDocIds,
+                        candidates.stream().map(ChromaService.SearchResult::documentId).toList());
                 return Collections.emptyList();
             }
 
@@ -289,7 +299,10 @@ public class RagService {
     public List<RetrievalResult> retrieveForStreaming(String query, UUID knowledgeBaseId, List<ChatMessage> history) {
         String rewrittenQuery = rewriteQueryWithHistory(query, history);
         log.debug("[stream] query rewrite: '{}' → '{}'", query, rewrittenQuery);
-        return retrieve(rewrittenQuery, knowledgeBaseId);
+        List<RetrievalResult> results = retrieve(rewrittenQuery, knowledgeBaseId);
+        log.info("[stream] 检索完成: retrieved={}, kbId={}, rewrittenQuery='{}'",
+                results.size(), knowledgeBaseId, rewrittenQuery);
+        return results;
     }
 
     /**

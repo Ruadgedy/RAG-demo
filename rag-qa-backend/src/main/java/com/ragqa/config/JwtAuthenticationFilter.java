@@ -50,6 +50,23 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     }
 
     /**
+     * 是否在异步分发（ASYNC dispatch）时跳过本过滤器。
+     *
+     * 默认 true：OncePerRequestFilter 不会在异步分发阶段再次执行。
+     * 这里改为 false，原因：SSE/Flux 接口（如 /api/chat/stream）返回
+     * Reactor Flux 时，Servlet 容器会触发 ASYNC dispatch 二次进入过滤器链。
+     * STATELESS 模式下 SecurityContext 不跨 dispatch 保存，若本过滤器在
+     * ASYNC 阶段不重新解析 JWT，AuthorizationFilter 会以 anonymous 身份校验
+     * /api/** 导致 403 AccessDeniedException。
+     *
+     * @return false —— ASYNC dispatch 阶段也重新解析 JWT 重建认证
+     */
+    @Override
+    protected boolean shouldNotFilterAsyncDispatch() {
+        return false;
+    }
+
+    /**
      * 过滤器核心方法
      *
      * @param request HTTP请求

@@ -145,6 +145,32 @@ public class DocumentController {
     }
 
     /**
+     * 重新处理文档（回填 knowledgeBaseId metadata）
+     *
+     * 【2026-06-30 修复多知识库串答】
+     * 清除旧向量/chunk 后用原始文件重新走处理流程，使 Chroma 切片带上 knowledgeBaseId
+     * metadata，从而支持查询期按知识库过滤。适用于历史文档（写入时缺该字段）。
+     */
+    @Operation(summary = "重新处理文档",
+            description = "清除旧向量与切片后重新解析/切片/向量化，用于回填 Chroma metadata 的 knowledgeBaseId 字段")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "202", description = "已触发重新处理"),
+            @ApiResponse(responseCode = "401", description = "未认证"),
+            @ApiResponse(responseCode = "404", description = "文档不存在"),
+            @ApiResponse(responseCode = "409", description = "原始文件不存在，无法重新处理")
+    })
+    @PostMapping("/documents/{id}/reprocess")
+    public ResponseEntity<Void> reprocessDocument(
+            @Parameter(description = "文档ID") @PathVariable UUID id) {
+        try {
+            documentService.reprocessDocument(id);
+            return ResponseEntity.accepted().build();
+        } catch (IllegalStateException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    /**
      * 【2026-06-27 增量】SSE 端点：实时推送文档状态变更
      *
      * 用法：
