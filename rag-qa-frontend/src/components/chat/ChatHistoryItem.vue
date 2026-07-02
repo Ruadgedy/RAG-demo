@@ -1,37 +1,78 @@
 <!--
-  ChatHistoryItem — 单条历史会话
+  ChatHistoryItem — 单条对话组（V6 重构版）
+
+  【V6 2026-06-30】
+  - 对话组（conversation）替代会话（session）
+  - 支持右键删除
 -->
 <template>
-  <button
+  <div
     class="hist-item"
     :class="{ active: isActive }"
-    type="button"
     @click="onClick"
+    @contextmenu.prevent="showMenu"
   >
     <MessageCircle :size="14" :stroke-width="2.2" class="hist-icon" />
     <div class="hist-text">
-      <div class="hist-title">{{ session.title || '（无标题）' }}</div>
-      <div class="hist-time">{{ formatTime(session.lastTime) }}</div>
+      <div class="hist-title">{{ conversation.title || conversation.firstQuery || '新对话' }}</div>
+      <div class="hist-meta">
+        <span>{{ conversation.turnCount || 0 }} 轮</span>
+        <span class="hist-dot">·</span>
+        <span>{{ formatTime(conversation.updatedAt) }}</span>
+      </div>
     </div>
-  </button>
+    <button
+      v-if="isActive"
+      class="hist-delete"
+      title="删除对话"
+      @click.stop="$emit('delete', conversation.id)"
+    >
+      <Trash2 :size="12" :stroke-width="2" />
+    </button>
+  </div>
+
+  <!-- 简易确认删除弹窗 -->
+  <Teleport to="body">
+    <div v-if="confirmDelete" class="delete-modal-overlay" @click="confirmDelete = false">
+      <div class="delete-modal" @click.stop>
+        <p>确定删除这个对话？</p>
+        <div class="delete-modal-btns">
+          <button class="btn-cancel" @click="confirmDelete = false">取消</button>
+          <button class="btn-confirm" @click="doDelete">删除</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <script setup>
-import { computed } from 'vue'
-import { MessageCircle } from 'lucide-vue-next'
+import { computed, ref } from 'vue'
+import { MessageCircle, Trash2 } from 'lucide-vue-next'
 import { useChatStore } from '@/stores/chat'
 
 const props = defineProps({
-  session: { type: Object, required: true },
+  conversation: { type: Object, required: true },
 })
 
-const chat = useChatStore()
+defineEmits(['delete'])
 
-const isActive = computed(() => chat.currentSessionId === props.session.sessionId)
+const chat = useChatStore()
+const confirmDelete = ref(false)
+
+const isActive = computed(() => chat.currentConversationId === props.conversation.id)
 
 async function onClick() {
   if (isActive.value) return
-  await chat.loadSession(props.session.sessionId)
+  await chat.loadConversation(props.conversation.id)
+}
+
+function showMenu() {
+  confirmDelete.value = true
+}
+
+async function doDelete() {
+  confirmDelete.value = false
+  await chat.deleteConversation(props.conversation.id)
 }
 
 function formatTime(t) {
@@ -52,9 +93,9 @@ function formatTime(t) {
   gap: 9px;
   padding: 8px 10px;
   border-radius: var(--r-md);
-  text-align: left;
   transition: all var(--t-fast);
-  width: 100%;
+  cursor: pointer;
+  position: relative;
 }
 
 .hist-item:hover {
@@ -93,9 +134,85 @@ function formatTime(t) {
   text-overflow: ellipsis;
 }
 
-.hist-time {
+.hist-meta {
   font-size: 11px;
   color: var(--text-tertiary);
   margin-top: 1px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.hist-dot {
+  opacity: 0.5;
+}
+
+.hist-delete {
+  padding: 4px;
+  border-radius: var(--r-sm);
+  color: var(--text-tertiary);
+  transition: all var(--t-fast);
+  flex-shrink: 0;
+}
+
+.hist-delete:hover {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+/* 删除确认弹窗 */
+.delete-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.delete-modal {
+  background: var(--bg-surface);
+  border-radius: var(--r-lg);
+  padding: 20px 24px;
+  min-width: 240px;
+  box-shadow: var(--shadow-lg);
+}
+
+.delete-modal p {
+  margin: 0 0 16px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.delete-modal-btns {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.btn-cancel, .btn-confirm {
+  padding: 6px 16px;
+  border-radius: var(--r-md);
+  font-size: var(--text-sm);
+  transition: all var(--t-fast);
+}
+
+.btn-cancel {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.btn-cancel:hover {
+  background: var(--bg-elevated);
+}
+
+.btn-confirm {
+  background: var(--red);
+  color: white;
+}
+
+.btn-confirm:hover {
+  opacity: 0.9;
 }
 </style>

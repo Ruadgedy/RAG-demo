@@ -1,16 +1,21 @@
 <!--
-  ChatHistoryList — 侧边栏对话历史列表
+  ChatHistoryList — 侧边栏对话历史列表（V6 重构版）
+
+  【V6 2026-06-30】
+  - 对话组（conversation）替代会话（session）
+  - 显示 firstQuery 作为摘要
 -->
 <template>
   <div class="hist-list">
-    <div v-if="chat.sessions.length === 0" class="hist-empty">
+    <div v-if="chat.conversations.length === 0" class="hist-empty">
       暂无对话记录
     </div>
 
     <ChatHistoryItem
-      v-for="s in chat.sessions"
-      :key="s.sessionId"
-      :session="s"
+      v-for="conv in chat.conversations"
+      :key="conv.id"
+      :conversation="conv"
+      @delete="handleDelete"
     />
   </div>
 </template>
@@ -20,6 +25,10 @@ import ChatHistoryItem from './ChatHistoryItem.vue'
 import { useChatStore } from '@/stores/chat'
 
 const chat = useChatStore()
+
+async function handleDelete(convId) {
+  await chat.deleteConversation(convId)
+}
 </script>
 
 <style scoped>

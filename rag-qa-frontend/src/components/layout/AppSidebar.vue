@@ -57,7 +57,7 @@
       <div class="section-title">
         <MessageSquare :size="14" :stroke-width="2.2" />
         <span>对话历史</span>
-        <span class="section-count">{{ chat.sessions.length }}</span>
+        <span class="section-count">{{ chat.conversations.length }}</span>
       </div>
       <ChatHistoryList />
     </section>
@@ -103,12 +103,12 @@ const avatarText = computed(() => {
 })
 
 function handleNewChat() {
-  chat.startNew()
+  chat.startNewConversation()
 }
 
 function handleLogout() {
   auth.logout()
-  chat.startNew()
+  chat.startNewConversation()
   toast.info('已退出登录')
   router.push('/login')
 }

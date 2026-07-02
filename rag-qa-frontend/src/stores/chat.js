@@ -1,9 +1,14 @@
 /**
- * 聊天 store
+ * 聊天 store（V6 重构版）
  *
- * - sessions: 会话摘要列表（来自 GET /api/chat-history）
- * - currentSessionId: 当前打开的会话
- * - messages: 当前会话的消息数组 [{role, content, sources?, ...}]
+ * 【V6 2026-06-30】
+ * - 对话组（conversation）替代会话（session）
+ * - 多轮对话支持滑动窗口
+ *
+ * 状态：
+ * - conversations: 对话组列表 [{id, title, firstQuery, historyWindow, turnCount}]
+ * - currentConversationId: 当前对话组
+ * - messages: 当前对话消息 [{role, content, sources?, chatId?}]
  * - streamMode: 'streaming' | 'oneShot'
  * - isStreaming: 流式问答进行中
  * - abortController: 流式中断句柄
@@ -11,16 +16,17 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import * as chatApi from '@/api/chat'
-import * as historyApi from '@/api/chatHistory'
+import * as conversationApi from '@/api/conversation'
 import { useKnowledgeBaseStore } from './knowledgeBase'
 import { useToast } from '@/composables/useToast'
 
 const STREAM_DEFAULT = import.meta.env.VITE_CHAT_STREAM !== 'false'
 
 export const useChatStore = defineStore('chat', () => {
-  const sessions = ref([])                       // [{sessionId, title, lastTime}]
-  const currentSessionId = ref(null)
-  const messages = ref([])
+  // ==================== 状态 ====================
+  const conversations = ref([])                    // 对话组列表
+  const currentConversationId = ref(null)        // 当前对话组 ID
+  const messages = ref([])                       // 当前对话消息
   const streamMode = ref(STREAM_DEFAULT ? 'streaming' : 'oneShot')
   const isStreaming = ref(false)
   const abortController = ref(null)
@@ -30,48 +36,151 @@ export const useChatStore = defineStore('chat', () => {
   const hasMessages = computed(() => messages.value.length > 0)
   const streamingEnabled = computed(() => streamMode.value === 'streaming')
 
+  // ==================== 对话组操作 ====================
+
+  /**
+   * 获取对话组列表
+   */
+  async function fetchConversations() {
+    const list = await conversationApi.getConversations()
+    conversations.value = list.map(c => ({
+      id: c.id,
+      title: c.title || c.firstQuery || '新对话',
+      firstQuery: c.firstQuery,
+      historyWindow: c.historyWindow || 3,
+      turnCount: c.turnCount || 0,
+      updatedAt: c.updatedAt,
+    }))
+    return conversations.value
+  }
+
+  /**
+   * 加载对话组消息
+   */
+  async function loadConversation(convId) {
+    currentConversationId.value = convId
+    const msgs = await conversationApi.getConversationMessages(convId)
+    messages.value = msgs.map(m => ({
+      role: 'user',
+      content: m.query,
+      sources: m.sources || [],
+      chatId: m.chatId,
+    }))
+    // 添加 AI 回复
+    msgs.forEach(m => {
+      if (m.content) {
+        messages.value.push({
+          role: 'assistant',
+          content: m.content,
+          sources: m.sources || [],
+          chatId: m.chatId,
+        })
+      }
+    })
+  }
+
+  /**
+   * 创建新对话（点击"新对话"按钮）
+   */
+  async function startNewConversation() {
+    const kb = useKnowledgeBaseStore().currentKb
+    if (!kb) {
+      toast.error('请先选择知识库')
+      return
+    }
+
+    try {
+      const conv = await conversationApi.createConversation(kb.id, 3)
+      // 添加到列表头部
+      conversations.value.unshift({
+        id: conv.id,
+        title: '新对话',
+        firstQuery: null,
+        historyWindow: conv.historyWindow || 3,
+        turnCount: 0,
+        updatedAt: conv.createdAt,
+      })
+      // 切换到新对话
+      currentConversationId.value = conv.id
+      messages.value = []
+      return conv
+    } catch (e) {
+      toast.error('创建对话失败：' + e.message)
+    }
+  }
+
+  /**
+   * 删除对话组
+   */
+  async function deleteConversation(convId) {
+    try {
+      await conversationApi.deleteConversation(convId)
+      conversations.value = conversations.value.filter(c => c.id !== convId)
+      if (currentConversationId.value === convId) {
+        currentConversationId.value = null
+        messages.value = []
+      }
+      toast.success('对话已删除')
+    } catch (e) {
+      toast.error('删除失败：' + e.message)
+    }
+  }
+
+  /**
+   * 更新滑动窗口
+   */
+  async function updateWindow(convId, windowSize) {
+    try {
+      const updated = await conversationApi.updateHistoryWindow(convId, windowSize)
+      const conv = conversations.value.find(c => c.id === convId)
+      if (conv) {
+        conv.historyWindow = updated.historyWindow
+      }
+      return updated
+    } catch (e) {
+      toast.error('更新失败：' + e.message)
+    }
+  }
+
+  /**
+   * 刷新当前对话组信息（标题等）
+   */
+  async function refreshCurrentConversation() {
+    if (!currentConversationId.value) return
+    try {
+      const conv = await conversationApi.getConversation(currentConversationId.value)
+      const localConv = conversations.value.find(c => c.id === currentConversationId.value)
+      if (localConv && conv.title) {
+        localConv.title = conv.title
+        localConv.firstQuery = conv.firstQuery
+        localConv.turnCount = conv.turnCount
+      }
+    } catch (e) {
+      // 静默失败，不影响主流程
+    }
+  }
+
+  // ==================== 模式切换 ====================
+
   function setStreamMode(mode) {
     if (isStreaming.value) return
     streamMode.value = mode
   }
 
-  async function fetchSessions() {
-    const raw = await historyApi.listHistory()
-    // 后端返回扁平 chat_history 列表；按 sessionId 聚合，取首条 content 作为标题
-    const map = {}
-    raw.forEach(h => {
-      if (!map[h.sessionId]) {
-        map[h.sessionId] = {
-          sessionId: h.sessionId,
-          title: (h.content || '').substring(0, 24) + ((h.content || '').length > 24 ? '…' : ''),
-          lastTime: h.createdAt,
-        }
-      }
-    })
-    sessions.value = Object.values(map).sort(
-      (a, b) => new Date(b.lastTime) - new Date(a.lastTime)
-    )
-    return sessions.value
-  }
-
-  async function loadSession(sessionId) {
-    currentSessionId.value = sessionId
-    const arr = await historyApi.getSessionMessages(sessionId)
-    messages.value = arr.map(h => ({ role: h.role, content: h.content }))
-  }
-
-  function startNew() {
-    currentSessionId.value = null
-    messages.value = []
-  }
+  // ==================== 发送消息 ====================
 
   /**
    * 发送消息（统一入口）
-   * @param {string} text 用户输入
    */
   async function sendMessage(text) {
     const kb = useKnowledgeBaseStore().currentKb
     if (!text?.trim() || isStreaming.value || !kb) return
+
+    // 如果没有当前对话组，先创建
+    if (!currentConversationId.value) {
+      await startNewConversation()
+      if (!currentConversationId.value) return
+    }
 
     messages.value.push({ role: 'user', content: text })
     isStreaming.value = true
@@ -82,29 +191,52 @@ export const useChatStore = defineStore('chat', () => {
       } else {
         await sendOneShot(text, kb.id)
       }
-      // 刷新侧边栏会话列表
-      await fetchSessions()
     } catch (e) {
-      messages.value.push({ role: 'assistant', content: `抱歉，请求失败：${e.message}` })
+      // 不再新增第二条 assistant 气泡（避免"回答两次"）：
+      // 若末尾已有占位 assistant 气泡（流式占位或 oneShot 未写入），把错误合并进去；
+      // 否则才补一条。
+      const last = messages.value[messages.value.length - 1]
+      const errText = `抱歉，请求失败：${e.message}`
+      if (last && last.role === 'assistant') {
+        last.content = (last.content ? last.content + '\n\n' : '') + errText
+      } else {
+        messages.value.push({ role: 'assistant', content: errText })
+      }
       toast.error('发送失败：' + e.message)
     } finally {
       isStreaming.value = false
       abortController.value = null
     }
+
+    // 流后刷新对话组信息与列表 —— 独立容错：
+    // 失败不连累已成功展示的答案、不抛 axios 30s timeout 进上面的 catch 再造第二条气泡。
+    try {
+      await refreshCurrentConversation()
+    } catch (e) {
+      console.warn('[chat] refreshCurrentConversation 失败:', e)
+    }
+    try {
+      await fetchConversations()
+    } catch (e) {
+      console.warn('[chat] fetchConversations 失败:', e)
+    }
   }
 
   async function sendOneShot(text, kbId) {
     const data = await chatApi.oneShotChat({
+      conversationId: currentConversationId.value,
       message: text,
       knowledgeBaseId: kbId,
-      history: messages.value.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
     })
-    if (data?.sessionId) currentSessionId.value = data.sessionId
-    // 【2026-06-29 增量 P0-01】保存来源引用，前端渲染"参考文档"卡片
+    // 更新当前对话组 ID（可能是新建的）
+    if (data?.conversationId) {
+      currentConversationId.value = data.conversationId
+    }
     messages.value.push({
       role: 'assistant',
       content: data?.answer ?? '',
       sources: Array.isArray(data?.sources) ? data.sources : [],
+      chatId: data?.chatId,
     })
   }
 
@@ -113,20 +245,28 @@ export const useChatStore = defineStore('chat', () => {
     const assistantIndex = messages.value.length
     messages.value.push({ role: 'assistant', content: '', sources: [] })
     let accumulated = ''
-    // 【2026-06-29 增量 P0-01】来源在 LLM 收尾时才到位，先存到临时变量
     let sourcesBuffer = []
 
     abortController.value = chatApi.streamChat(
       {
+        conversationId: currentConversationId.value,
         message: text,
         knowledgeBaseId: kbId,
-        history: messages.value.slice(0, -2).map(m => ({ role: m.role, content: m.content })),
       },
       {
-        onSessionId: (sid) => { currentSessionId.value = sid },
+        onSessionId: (sid) => {
+          // sid 格式: conversationId|chatId
+          const [convId, chatId] = sid.split('|')
+          if (convId && currentConversationId.value !== convId) {
+            currentConversationId.value = convId
+          }
+          // 记录 chatId 到当前消息
+          if (chatId && messages.value[assistantIndex]) {
+            messages.value[assistantIndex].chatId = chatId
+          }
+        },
         onChunk: (chunk) => {
           accumulated += chunk
-          // 注意：保留 sources 字段（之前 onSources 写过）
           messages.value[assistantIndex] = {
             role: 'assistant',
             content: accumulated,
@@ -134,7 +274,6 @@ export const useChatStore = defineStore('chat', () => {
           }
         },
         onSources: (sources) => {
-          // 【2026-06-29 增量 P0-01】SSE sources 事件触发，把来源写回消息
           sourcesBuffer = Array.isArray(sources) ? sources : []
           messages.value[assistantIndex] = {
             role: 'assistant',
@@ -150,7 +289,7 @@ export const useChatStore = defineStore('chat', () => {
           }
         },
         onDone: () => {
-          // 流结束；isStreaming 已在 sendMessage finally 中清掉
+          // 流结束
         },
       }
     )
@@ -162,9 +301,18 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // ==================== 导出 ====================
+
   return {
-    sessions, currentSessionId, messages, streamMode, isStreaming, abortController,
+    // 状态
+    conversations, currentConversationId, messages, streamMode, isStreaming, abortController,
     hasMessages, streamingEnabled,
-    setStreamMode, fetchSessions, loadSession, startNew, sendMessage, stop,
+    // 对话组操作
+    fetchConversations, loadConversation, startNewConversation,
+    deleteConversation, updateWindow, refreshCurrentConversation,
+    // 模式切换
+    setStreamMode,
+    // 发送消息
+    sendMessage, stop,
   }
 })

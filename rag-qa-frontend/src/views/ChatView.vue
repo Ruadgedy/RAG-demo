@@ -71,7 +71,7 @@ const docStream = useDocumentStream(kbStore.currentKb, kbStore.documents)
 onMounted(async () => {
   try {
     await kbStore.fetchAll()
-    await chat.fetchSessions()
+    await chat.fetchConversations()
     if (kbStore.currentKb) {
       await kbStore.fetchDocuments(kbStore.currentKb.id)
     }
@@ -90,7 +90,7 @@ watch(
   () => kbStore.currentKb?.id,
   (newId, oldId) => {
     if (oldId && newId && newId !== oldId) {
-      chat.startNew()
+      chat.startNewConversation()
     }
   }
 )
