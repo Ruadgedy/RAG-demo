@@ -28,6 +28,7 @@ Thumbs.db
 uploads/
 chroma/
 chroma-data/
+temp/
 
 # Test coverage
 jacoco/
