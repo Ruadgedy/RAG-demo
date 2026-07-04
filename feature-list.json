@@ -291,6 +291,112 @@
       "dependencies": [],
       "ui": true,
       "ui_entry": "/login"
+    },
+    {
+      "id": 17,
+      "category": "feature",
+      "title": "Tool 抽象 + KnowledgeBaseSearchTool",
+      "description": "定义统一 ToolResult + @Tool 抽象；实现 KnowledgeBaseSearchTool 包装 RagService.retrieve（复用召回+rerank+fallback）；KnowledgeBaseContext 注入 kbId 不暴露给 LLM",
+      "priority": "high",
+      "status": "failing",
+      "wave": 1,
+      "srs_trace": ["FR-013"],
+      "verification_steps": [
+        "Given KnowledgeBaseSearchTool 已注册, when agent 调用 searchKnowledgeBase(query), then 复用 RagService.retrieve 返回 RetrievalResult",
+        "Given KnowledgeBaseContext, when tool 执行, then kbId 从上下文注入而非 LLM 参数"
+      ],
+      "dependencies": [4],
+      "ui": false
+    },
+    {
+      "id": 18,
+      "category": "feature",
+      "title": "WebSearchTool（Tavily）+ DirectAnswerTool",
+      "description": "WebSearchTool 调 Tavily API 返回 top-N 摘要；无 TAVILY_API_KEY 时不注册。DirectAnswerTool 处理闲聊/常识类直接回答",
+      "priority": "high",
+      "status": "failing",
+      "wave": 1,
+      "srs_trace": ["FR-013"],
+      "verification_steps": [
+        "Given TAVILY_API_KEY 已配置, when 调用 searchWeb(query), then 返回 Tavily top-N 摘要",
+        "Given TAVILY_API_KEY 未配置, when agent 启动, then WebSearchTool 不可用",
+        "Given 闲聊问题, when agent 判断无需检索, then 调用 DirectAnswerTool 直接回答"
+      ],
+      "dependencies": [17],
+      "ui": false
+    },
+    {
+      "id": 19,
+      "category": "feature",
+      "title": "AgenticRagService + agent loop + 降级",
+      "description": "AgenticRagService 用 ChatClient.tools() + internalToolExecutionEnabled 跑 tool-calling loop；CompletableFuture 总超时（30s）兜底；超时/异常降级到 RagService.chat（linear）",
+      "priority": "high",
+      "status": "failing",
+      "wave": 1,
+      "srs_trace": ["FR-012"],
+      "verification_steps": [
+        "Given rag.mode=agentic 且 KB 有文档, when 提问需多源, then agent 调 ≥2 次 tool 返回综合回答",
+        "Given agent 总超时, when 超时触发, then 降级 linear RAG 返回回答",
+        "Given LLM 不支持 tool-calling, when 调用, then 回退 RagService.chat"
+      ],
+      "dependencies": [17, 18],
+      "ui": false
+    },
+    {
+      "id": 20,
+      "category": "feature",
+      "title": "rag.mode 路由 + ChatService 集成",
+      "description": "application.properties 加 rag.mode（默认 linear）；ChatService 按开关路由到 RagService（linear）或 AgenticRagService（agentic）；linear 行为完全不变",
+      "priority": "high",
+      "status": "failing",
+      "wave": 1,
+      "srs_trace": ["FR-012"],
+      "verification_steps": [
+        "Given rag.mode=linear, when 提问, then 走 RagService 流水线行为不变",
+        "Given rag.mode=agentic, when 提问, then 走 AgenticRagService"
+      ],
+      "dependencies": [19],
+      "ui": false
+    },
+    {
+      "id": 21,
+      "category": "feature",
+      "title": "agent_trace 表 + trace 落库 + SSE agent_step",
+      "description": "Flyway 迁移建 agent_trace 表；AgentTraceCollector 记录每轮 tool 调用；SSE 推送 agent_step 事件（start/done）；chat_history.rag_metadata 加 agent_mode/agent_rounds/degraded",
+      "priority": "medium",
+      "status": "failing",
+      "wave": 1,
+      "srs_trace": ["FR-014"],
+      "verification_steps": [
+        "Given agent 完成问答, when 查询 agent_trace, then 该 chat_id 下有 N 行 trace",
+        "Given 流式问答, when agent 调 tool, then SSE 推送 agent_step 事件",
+        "Given agent 降级, when 降级触发, then rag_metadata 记录 degraded=true"
+      ],
+      "dependencies": [19],
+      "ui": false
+    },
+    {
+      "id": 22,
+      "category": "feature",
+      "title": "Eval A/B + ST 测试用例",
+      "description": "EvalService 加 linear vs agentic A/B 对比；编写 docs/test-cases/feature-17~22.md ST 测试用例",
+      "priority": "medium",
+      "status": "failing",
+      "wave": 1,
+      "srs_trace": ["FR-012", "FR-013", "FR-014"],
+      "verification_steps": [
+        "Given EvalService A/B, when 同题对比 linear vs agentic, then 输出量化对比报告",
+        "Given ST 测试用例, when 执行, then 覆盖 FR-012~014 验收标准"
+      ],
+      "dependencies": [21],
+      "ui": false
+    }
+  ],
+  "waves": [
+    {
+      "id": 1,
+      "date": "2026-07-03",
+      "description": "Agentic RAG 升级（P1+P2）：Tool 抽象 + 多源检索 + agent loop + trace 落库"
     }
   ]
 }
