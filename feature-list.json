@@ -65,6 +65,14 @@
       "description": "上传文档的存储目录",
       "required_by": [2, 3],
       "check_hint": "设置为本地目录路径，如 ./uploads"
+    },
+    {
+      "name": "Tavily Web 搜索 API Key",
+      "type": "env",
+      "key": "TAVILY_API_KEY",
+      "description": "Tavily Web 搜索 API 密钥（Agentic RAG WebSearchTool 用，可选，未配置则该 tool 不注册）",
+      "required_by": [18],
+      "check_hint": "从 https://tavily.com 获取 API Key，免费 1000 次/月"
     }
   ],
   "features": [
