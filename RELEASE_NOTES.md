@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- Increment Wave 1 (2026-07-03): Agentic RAG 升级（P1+P2）
+  - 新增 FR-012 Agentic 问答模式 / FR-013 工具抽象与多源检索 / FR-014 Agent 可观测与 trace 落库
+  - 新增 F17-F22：Tool 抽象+KB工具 / Web工具(Tavily)+直答 / AgenticRagService+降级 / rag.mode 路由 / agent_trace+SSE / Eval A/B+ST
+  - Design §11 + SRS §3.5 增量文档；PoC 验证 MiniMax-M3 tool-calling 可行（4 用例全过）
+  - `rag.mode` 默认 linear 灰度，agentic 显式启用；agent 总超时 30s 降级 linear
 - Feature #1: Spring Boot项目初始化 - 应用可以启动在8080端口
 - Spring AI 1.0.0-M6依赖配置
 - Maven settings.xml解决阿里云mirror问题

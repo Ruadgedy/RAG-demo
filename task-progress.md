@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 16/16 · Last: Feature #16 (用户注册登录) · Next: All features completed!
+Progress: 16/22 · Last: Increment Wave 1 (Agentic RAG) · Next: Feature #17 (Tool 抽象 + KnowledgeBaseSearchTool)
 
 ---
 
@@ -74,3 +74,20 @@ Progress: 16/16 · Last: Feature #16 (用户注册登录) · Next: All features 
 - RAG问答: 正常工作 ✅
 
 **总计：16/16 features passed**
+
+### Session 5 — Increment Wave 1 (Agentic RAG) (2026-07-03)
+
+**Phase**: Increment
+**Scope**: 升级到 Agentic RAG（P1+P2）—— Tool 抽象 + 多源检索 + agent loop + trace 落库
+
+**完成内容**：
+- ✅ PoC 验证：MiniMax-M3 + Spring AI 1.1.3 tool-calling 4 用例全过（`MiniMaxToolCallingPoCTest`，`@EnabledIfSystemProperty(named="rag.poc")` 守护）
+- ✅ Design §11 增量：AgenticRagService + 3 工具（KB/Tavily Web/直答）+ agent_trace 表 + 降级矩阵 + PoC 结论
+- ✅ SRS §3.5 增量：FR-012 Agentic 问答模式 / FR-013 工具抽象与多源检索 / FR-014 Agent 可观测与 trace 落库
+- ✅ feature-list.json 增量：F17-F22（wave 1, failing）+ waves[] 数组 + required_configs TAVILY_API_KEY
+- ✅ .env.example 加 Tavily 配置块
+
+**关键决策**：Spring AI 原生 tool-calling（非 LangGraph4j）；maxIterations 无 API 靠 CompletableFuture 超时（30s）兜底；rag.mode 默认 linear 灰度；agent_trace 新表；Tavily Web 搜索
+
+**Documents updated**: SRS, Design, feature-list.json, .env.example
+**Next**: Worker cycles 实现 F17-F22（TDD，按 long-task-guide Red→Green→Coverage→Mutation→Persist）
