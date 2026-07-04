@@ -1132,3 +1132,252 @@ JWT_SECRET=$(openssl rand -base64 32) mvn test \
 <!-- Design Review: PASS - 2026-03-15 -->
 <!-- Design Review: PASS (增量) - 2026-06-27 -->
 <!-- Design Review: PASS (SSE 增量) - 2026-06-27 -->
+
+---
+
+## 11. Agentic RAG 升级（2026-07-03 增量 · Wave 1）
+
+> 增量信号：`increment-request.json`（reason: 升级 Agentic RAG；scope: P1+P2）
+> 影响需求：FR-012（新）、FR-013（新）、FR-014（新）
+> 影响特性：F4/F5/F6/F14（Soft impact，不 reset）+ 新增 F17-F22
+> PoC 验证：✅ 通过（`MiniMaxToolCallingPoCTest`，4 用例全过）
+
+### 11.1 背景与目标
+
+**痛点**：现有 `RagService.chat()` 是 Linear RAG（rewrite → retrieve → augment → generate 单次流水线），知识源仅 Chroma 文档库；知识库无 COMPLETED 文档时直接短路返回"暂无文档"不调 LLM；复杂问题单次检索不足。
+
+**目标**：LLM 作为 controller 自主编排工具，支持多跳检索 + 反思，知识源扩展到 Web。
+
+**范围（P1+P2）**：
+- P1：Tool 抽象 + KB检索 + Web搜索(Tavily) + 直答工具 + Router 单轮决策 + 降级
+- P2：Spring AI 原生 tool-calling loop（多跳+反思）+ agent_trace 落库 + SSE 进度
+
+**非目标**：SQL/计算器工具留 P3；前端 agent 思考链 UI 留 P3。
+
+### 11.2 整体架构
+
+```
+                         ┌──────────────────────────┐
+   ChatService ─────────►│  rag.mode 路由            │
+                         └───────┬──────────────────┘
+                          linear │ agentic
+                  ┌──────────────┴───────────────┐
+                  ▼                              ▼
+           RagService (现存)            AgenticRagService (新增)
+           linear pipeline              LLM controller + tool-calling loop
+                                              │
+                                  ┌───────────┼───────────┐
+                                  ▼           ▼           ▼
+                          KnowledgeBase   WebSearch   DirectAnswer
+                          SearchTool      (Tavily)    Tool
+                              │
+                              └──► 复用 RagService.retrieve() (召回+rerank+fallback)
+```
+
+**关键原则**：`AgenticRagService` 与 `RagService` 并存，`rag.mode` 开关灰度切换；`KnowledgeBaseSearchTool` 注入 `RagService` 复用现有检索链路，零重复实现。
+
+### 11.3 组件设计
+
+#### 11.3.1 Tool 抽象
+
+统一用 Spring AI `@Tool` 注解。工具返回统一 `ToolResult`（便于 trace 落库 + LLM 格式统一）：
+
+```java
+public record ToolResult(String toolName, String content, String source, long durationMs) {}
+```
+
+**设计要点**：`knowledgeBaseId` 不作为 tool 参数暴露给 LLM（避免瞎填跨库检索），通过 `KnowledgeBaseContext`（ThreadLocal 或方法隐式传参）注入。
+
+#### 11.3.2 KnowledgeBaseSearchTool（F17）
+
+包装 `RagService.retrieve()`，复用 Chroma 召回 + rerank + fallback + OOM 防护。
+
+```java
+@Component
+public class KnowledgeBaseSearchTool {
+    private final RagService ragService;
+    private final KnowledgeBaseContext context;
+
+    @Tool(description = "在企业知识库检索内部文档。涉及已上传的产品手册、规范、内部资料时使用。")
+    public ToolResult searchKnowledgeBase(String query) {
+        // 内部调 ragService.retrieve(query, context.kbId(), TOP_K)
+    }
+}
+```
+
+#### 11.3.3 WebSearchTool（F18，Tavily）
+
+```java
+@Component
+public class WebSearchTool {
+    @Tool(description = "搜索互联网获取最新或知识库外的信息。涉及时效性/外部信息时使用。")
+    public ToolResult searchWeb(String query) {
+        // Tavily HTTP POST /search，返回 top-N 摘要
+    }
+}
+```
+- 数据源：Tavily（专为 LLM 优化，免费 1000/月，返回干净文本）
+- 无 `TAVILY_API_KEY` 时该 tool 不注册，agent 仅用 KB/直答（FR-013 Optional）
+
+#### 11.3.4 DirectAnswerTool（F18）
+
+```java
+@Tool(description = "直接回答闲聊、寒暄、通用常识类问题。无需检索时使用。")
+public ToolResult directAnswer(String question) {
+    // 返回提示让 LLM 直接生成，省检索开销
+}
+```
+作用：闲聊/常识类跳过检索，省 token 省延迟。
+
+#### 11.3.5 AgenticRagService（F19，核心）
+
+```java
+@Service
+public class AgenticRagService {
+    private final ChatClient.Builder chatClientBuilder;
+    private final KnowledgeBaseSearchTool kbTool;
+    private final WebSearchTool webTool;        // 可空（无 API key）
+    private final DirectAnswerTool directTool;
+    private final RagService ragService;        // 降级用
+    private final AgentTraceCollector trace;
+
+    public ChatResult chat(String message, UUID kbId, List<ChatMessage> history, int window) {
+        // 1. CompletableFuture.supplyAsync 包裹，总超时兜底（见 11.3.7）
+        // 2. ChatClient.prompt().user(message).tools(kbTool, webTool, directTool)
+        //        .options(ToolCallingChatOptions.builder()
+        //            .model(agentModel)
+        //            .internalToolExecutionEnabled(true)  // 框架自动跑 tool loop
+        //            .build())
+        //        .call().content()
+        // 3. trace 记录每轮 tool 调用
+        // 4. 超时/异常 → 降级 ragService.chat()
+    }
+}
+```
+
+**【PoC 发现 · 设计调整 1】**：Spring AI 1.1.3 的 `ToolCallingChatOptions` **无 `maxIterations` API**（只有 `internalToolExecutionEnabled`）。防死循环不能靠框架迭代上限，改用 **CompletableFuture + 总超时（默认 30s）兜底**（同 `QueryRewriteService` 的超时模式）。超时则 `future.cancel(true)` + 降级 linear。
+
+**【PoC 发现 · 设计调整 2】**：`MiniMaxChatModel` 依赖 `ToolCallingManager` + `RetryTemplate`，必须 `@EnableAutoConfiguration` 全量加载。主应用 `@SpringBootApplication` 天然满足，不影响正式集成；PoC 用 `@EnableAutoConfiguration` + `webEnvironment=NONE` + `spring.ai.vectorstore.chroma.enabled=false` 跑通。
+
+#### 11.3.6 Agent Loop 时序
+
+```
+user: "我们公司产品A和竞品X比，2026年最新价格优势在哪？"
+  │
+  ▼ Round 1: LLM 推理 → 调 KB检索("产品A 价格")
+  │           KB 命中内部手册 → context+="产品A价格..."
+  ▼ Round 2: LLM 推理 → 调 Web搜索("竞品X 2026 价格")
+  │           Web 命中 → context+="竞品X最新定价..."
+  ▼ Round 3: LLM 推理 → 信息足够，生成对比回答
+  ▼ 返回 answer + agent_trace（3 轮）
+```
+Spring AI 1.1.x `ChatClient.call()` 自动处理 tool-execution loop（LLM 请求 tool → 框架执行 → 结果回填 → LLM 继续，直到不再请求 tool）。
+
+#### 11.3.7 降级矩阵（F19，决定可靠性）
+
+| 触发条件 | 降级动作 |
+|---|---|
+| LLM/模型不支持 tool-calling | 回退 `RagService.chat()`（linear） |
+| 单次 tool 调用超时 | 跳过该 tool，用已累积 context 继续 |
+| 总超时（30s）触发 | `future.cancel(true)` + 降级 linear |
+| Web 搜索无 API key / 失败 | 仅 KB/直答 tool 可用，照常 agent loop |
+| `rag.mode=linear` | 直接走 `RagService`，不进 agent |
+
+### 11.4 数据模型扩展（F21）
+
+新增 `agent_trace` 表（Flyway 迁移 `V__add_agent_trace.sql`），避免 `chat_history.rag_metadata` JSON 膨胀：
+
+```sql
+CREATE TABLE agent_trace (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  chat_id BIGINT NOT NULL,           -- 关联 chat_history.id
+  round INT NOT NULL,                -- 第几轮 tool 调用
+  tool_name VARCHAR(64) NOT NULL,    -- kb_search / web_search / direct_answer
+  tool_args TEXT,                    -- JSON: {"query":"..."}
+  result_summary TEXT,               -- 截断的 tool 返回摘要
+  duration_ms INT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_chat (chat_id)
+);
+```
+
+`chat_history.rag_metadata` 增加字段：`agent_mode`(linear/agentic)、`agent_rounds`、`degraded`(bool)。
+
+### 11.5 配置项
+
+```properties
+# === Agentic RAG ===
+rag.mode=${RAG_MODE:linear}              # linear|agentic，默认 linear 灰度
+rag.agent.model=${RAG_AGENT_MODEL:MiniMax-M3}
+rag.agent.timeout-ms=${RAG_AGENT_TIMEOUT_MS:30000}
+rag.agent.temperature=0.0
+# Web 搜索（Tavily）
+rag.web.search.provider=${RAG_WEB_PROVIDER:tavily}
+rag.web.search.api-key=${TAVILY_API_KEY:}
+rag.web.search.topk=5
+rag.web.search.timeout-ms=8000
+```
+
+### 11.6 SSE 集成（F21）
+
+复用现有 SSE 流式通道，新增 agent 步骤事件（前端 P3 做 UI，P1/P2 仅落库 + 推送）：
+
+```
+event: agent_step
+data: {"round":1,"tool":"kb_search","status":"start","query":"产品A 价格"}
+
+event: agent_step
+data: {"round":1,"tool":"kb_search","status":"done","durationMs":320,"hits":3}
+
+event: answer
+data: {"content":"..."}   # 最终回答（流式）
+```
+
+### 11.7 测试策略（对齐质量门槛：行90%/分支80%/变异80%）
+
+| 层 | 测试 | 覆盖目标 |
+|---|---|---|
+| Tool 单元 | `KnowledgeBaseSearchToolTest`（mock RagService）、`WebSearchToolTest`（mock HTTP） | 工具入参/返回/超时 |
+| Agent 单元 | `AgenticRagServiceTest`（mock ChatClient 模拟 tool-calling 多轮） | 正常多跳、降级、超时 |
+| 降级路径 | 单独用例覆盖降级矩阵每一行 | 分支覆盖 |
+| 集成 | `@SpringBootTest` + profile 隔离，可选 `@Disabled` 跑真实 LLM | 端到端 |
+| Eval | `EvalService` A/B：linear vs agentic 同题对比 | 量化收益 |
+
+### 11.8 任务分解（F17-F22）
+
+| Feature | 内容 | srs_trace | 依赖 |
+|---|---|---|---|
+| F17 | Tool 抽象 + KnowledgeBaseSearchTool + KnowledgeBaseContext | FR-013 | F4 |
+| F18 | WebSearchTool(Tavily) + DirectAnswerTool | FR-013 | F17 |
+| F19 | AgenticRagService + tool-calling loop + CompletableFuture 超时 + 降级 | FR-012 | F17, F18 |
+| F20 | rag.mode 开关 + ChatService 路由 + linear 兼容 | FR-012 | F19 |
+| F21 | agent_trace 表 Flyway + trace 落库 + SSE agent_step 事件 | FR-014 | F19 |
+| F22 | Eval A/B + ST 测试用例（docs/test-cases/feature-17~22.md） | FR-012~014 | F21 |
+
+### 11.9 风险与应对
+
+| 风险 | 应对 |
+|---|---|
+| Agent loop 死循环/超时 | 总超时 30s + CompletableFuture.cancel + 强制降级 |
+| Web search API 成本 | Tavily 免费额度 1000/月；缓存查询结果 |
+| Token 消耗增大 | tool 返回结果摘要截断；总超时限制 |
+| 现有 SSE/linear 行为回归 | `rag.mode=linear` 默认，灰度切换，回归测试 |
+| MiniMax tool-calling 稳定性 | PoC 已验证（4 用例通过） |
+
+### 11.10 修改文件清单（预估）
+
+- 新增：`AgenticRagService.java`、`KnowledgeBaseSearchTool.java`、`WebSearchTool.java`、`DirectAnswerTool.java`、`KnowledgeBaseContext.java`、`AgentTraceCollector.java`、`AgentTrace` 实体 + Repository、Flyway `V__add_agent_trace.sql`、对应 Test、`docs/test-cases/feature-17~22.md`
+- 修改：`ChatService.java`（路由）、`application.properties`（配置块）、`pom.xml`（Tavily 依赖或 HTTP）、`ChatServiceTest.java`
+- 配置：`.env.example` 加 `TAVILY_API_KEY`
+
+### 11.11 PoC 验证结论（2026-07-03）
+
+`MiniMaxToolCallingPoCTest`（`@EnabledIfSystemProperty(named="rag.poc")` 守护，手动 `-Drag.poc=true` 运行，不污染 CI）4 用例全过：
+1. 单 tool：调 `getServerTime` 1 次 ✅
+2. KB 风格：调 `searchProduct`，基于结果回答 ✅
+3. 多 tool：连续调 2 次 `searchProduct`（P2 地基）✅
+4. 无需 tool：0 次调用，直接自答 ✅
+
+**结论**：MiniMax-M3 + Spring AI 1.1.3 tool-calling 完全可用，Agentic RAG 技术地基通过。
+
+<!-- Design Review: PASS (Agentic RAG 增量) - 2026-07-03 -->
