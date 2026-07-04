@@ -53,6 +53,17 @@ public class RagService {
      * 之前是只注入没用上，现在接入 retrieve() 的两阶段检索链路。
      */
     private final RerankService rerankService;
+    /**
+     * 【2026-07-02 增量】查询改写服务（LLM Rewrite）
+     *
+     * 替代老逻辑 {@code rewriteQueryWithHistory} 的简单空格拼接：
+     * - 多轮场景：调 LLM 把当前问题 + 上下文改写为独立检索 query
+     * - 失败/超时：自动降级到 simple 拼接，主流程不中断
+     * - 首轮：直接返回原 query，零开销
+     *
+     * 模式由 {@code rag.query.rewrite.mode} 控制（llm|simple|none）。
+     */
+    private final QueryRewriteService queryRewriteService;
 
     /** 检索返回的最终结果数量（传给 LLM 的 top-K） */
     @Value("${retrieval.topk:3}")
@@ -112,11 +123,20 @@ public class RagService {
     /**
      * RAG 问答结果（V3 新增：含 RAG 召回元数据，用于持久化到 chat_history.rag_metadata）。
      *
-     * @param answer LLM 生成的最终回答
-     * @param retrievedDocs 实际参与本次生成的检索结果列表（已按知识库过滤）
+     * <p>【2026-07-02 增量】新增 {@code rewrittenQuery} 字段：
+     * <ul>
+     *   <li>流式场景下 answer 为 null（边生成边推，本方法只负责检索 + 改写）</li>
+     *   <li>非流式场景下 answer 是 LLM 生成的完整回答</li>
+     *   <li>rewrittenQuery 是 LLM/Simple 改写后的检索 query（用于落库 rag_metadata）</li>
+     * </ul>
+     *
+     * @param answer              LLM 生成的最终回答（流式场景可为 null）
+     * @param retrievedDocs       实际参与本次生成的检索结果列表（已按知识库过滤）
      * @param retrievalDurationMs 检索阶段耗时（毫秒）
+     * @param rewrittenQuery      改写后的检索 query（用于评估检索质量、A/B 对比）
      */
-    public record ChatResult(String answer, List<RetrievalResult> retrievedDocs, long retrievalDurationMs) {}
+    public record ChatResult(String answer, List<RetrievalResult> retrievedDocs,
+                             long retrievalDurationMs, String rewrittenQuery) {}
 
     /**
      * 处理用户问答（非流式），返回含 RAG 元数据的结果。
@@ -129,13 +149,20 @@ public class RagService {
      *     让 embedding 看到上下文（消除"它"、"那个"等指代歧义）
      *   - 生成阶段：把 history 注入 prompt，让 LLM 也知道上文
      *
-     * @param message 用户当前问题
+     * 【2026-07-02 增量】historyWindow 参数 + rewrittenQuery 落库
+     *   - historyWindow 由 ChatService 从 Conversation.historyWindow 取值传入，
+     *     与 prompt 注入的历史窗口保持单一来源
+     *   - 改写后的 query 一并写入 ChatResult，供 ChatService 落库 rag_metadata
+     *
+     * @param message         用户当前问题
      * @param knowledgeBaseId 知识库ID
-     * @param history 多轮对话历史（前端已传；ChatService 兜底传 List.of()）
-     * @return ChatResult（answer + 召回列表 + 检索耗时）
+     * @param history         多轮对话历史（前端已传；ChatService 兜底传 List.of()）
+     * @param historyWindow   改写 + prompt 注入共同使用的历史轮数（来自 Conversation.historyWindow）
+     * @return ChatResult（answer + 召回列表 + 检索耗时 + 改写后 query）
      */
-    public ChatResult chat(String message, UUID knowledgeBaseId, List<ChatMessage> history) {
-        log.info("RAG问答: message='{}', historySize={}", message, history == null ? 0 : history.size());
+    public ChatResult chat(String message, UUID knowledgeBaseId, List<ChatMessage> history, int historyWindow) {
+        log.info("RAG问答: message='{}', historySize={}, historyWindow={}",
+                message, history == null ? 0 : history.size(), historyWindow);
 
         // 1. 检查知识库是否有已处理的文档
         List<Document> documents = documentRepository.findByKnowledgeBaseId(knowledgeBaseId);
@@ -144,25 +171,25 @@ public class RagService {
                 .anyMatch(doc -> doc.getStatus() == Document.DocumentStatus.COMPLETED);
 
         if (!hasCompletedDocs) {
-            return new ChatResult("该知识库暂无文档，请先上传文档。", java.util.List.of(), 0L);
+            return new ChatResult("该知识库暂无文档，请先上传文档。", java.util.List.of(), 0L, message);
         }
 
-        // 2. 检索相关文档（query 用 history 重写过的版本，让 embedding 看到上下文）
-        String rewrittenQuery = rewriteQueryWithHistory(message, history);
+        // 2. 检索相关文档（query 用 QueryRewriteService 改写后的版本，让 embedding 看到上下文）
+        String rewrittenQuery = queryRewriteService.rewrite(message, history, historyWindow);
         log.debug("query rewrite: '{}' → '{}'", message, rewrittenQuery);
         long retrievalStart = System.currentTimeMillis();
         List<RetrievalResult> retrieved = retrieve(rewrittenQuery, knowledgeBaseId);
         long retrievalDurationMs = System.currentTimeMillis() - retrievalStart;
 
         if (retrieved.isEmpty()) {
-            return new ChatResult("该知识库暂无文档，请先上传文档。", java.util.List.of(), retrievalDurationMs);
+            return new ChatResult("该知识库暂无文档，请先上传文档。", java.util.List.of(), retrievalDurationMs, rewrittenQuery);
         }
 
         // 3. 构建上下文：将检索到的文档拼接成上下文字符串
         String context = buildContext(retrieved);
 
         // 4. 构建提示词：将上下文 + history + 问题组合成完整提示
-        String prompt = buildPromptWithHistory(context, history, message);
+        String prompt = buildPromptWithHistory(context, history, message, historyWindow);
 
         // 5. 调用LLM生成回答
         try {
@@ -173,10 +200,10 @@ public class RagService {
 
             if (response == null || response.isEmpty()) {
                 log.warn("LLM返回空响应，可能余额不足");
-                return new ChatResult("AI服务余额不足，请联系管理员充值后继续使用。", retrieved, retrievalDurationMs);
+                return new ChatResult("AI服务余额不足，请联系管理员充值后继续使用。", retrieved, retrievalDurationMs, rewrittenQuery);
             }
 
-            return new ChatResult(response, retrieved, retrievalDurationMs);
+            return new ChatResult(response, retrieved, retrievalDurationMs, rewrittenQuery);
         } catch (Exception e) {
             log.error("LLM调用失败: {}", e.getMessage());
 
@@ -184,10 +211,10 @@ public class RagService {
             String errorMsg = e.getMessage();
             if (errorMsg != null && (errorMsg.contains("insufficient_balance") ||
                 errorMsg.contains("insufficient balance") || errorMsg.contains("1008"))) {
-                return new ChatResult("AI服务余额不足，请联系管理员充值后继续使用。", retrieved, retrievalDurationMs);
+                return new ChatResult("AI服务余额不足，请联系管理员充值后继续使用。", retrieved, retrievalDurationMs, rewrittenQuery);
             }
 
-            return new ChatResult("抱歉，AI服务暂时不可用，请稍后重试。", retrieved, retrievalDurationMs);
+            return new ChatResult("抱歉，AI服务暂时不可用，请稍后重试。", retrieved, retrievalDurationMs, rewrittenQuery);
         }
     }
 
@@ -292,17 +319,25 @@ public class RagService {
      *
      * 【2026-06-29 增量 P0-02】接受 history 参数，复用非流式的 query 重写逻辑
      *
-     * @param query 当前用户问题
+     * 【2026-07-02 增量】historyWindow 透传 + 返回 ChatResult
+     *   - historyWindow 来自 Conversation.historyWindow，与 chat() 保持单一来源
+     *   - 返回 ChatResult（answer=null）携带 rewrittenQuery，供 ChatService 落库
+     *
+     * @param query          用户当前问题
      * @param knowledgeBaseId 知识库ID
-     * @param history 对话历史（可空）
+     * @param history        对话历史（可空）
+     * @param historyWindow  改写用的历史轮数（来自 Conversation.historyWindow）
+     * @return ChatResult（answer=null，含召回列表 + 检索耗时 + 改写后 query）
      */
-    public List<RetrievalResult> retrieveForStreaming(String query, UUID knowledgeBaseId, List<ChatMessage> history) {
-        String rewrittenQuery = rewriteQueryWithHistory(query, history);
+    public ChatResult retrieveForStreaming(String query, UUID knowledgeBaseId, List<ChatMessage> history, int historyWindow) {
+        long retrievalStart = System.currentTimeMillis();
+        String rewrittenQuery = queryRewriteService.rewrite(query, history, historyWindow);
         log.debug("[stream] query rewrite: '{}' → '{}'", query, rewrittenQuery);
         List<RetrievalResult> results = retrieve(rewrittenQuery, knowledgeBaseId);
+        long retrievalDurationMs = System.currentTimeMillis() - retrievalStart;
         log.info("[stream] 检索完成: retrieved={}, kbId={}, rewrittenQuery='{}'",
                 results.size(), knowledgeBaseId, rewrittenQuery);
-        return results;
+        return new ChatResult(null, results, retrievalDurationMs, rewrittenQuery);
     }
 
     /**
@@ -452,18 +487,19 @@ public class RagService {
      * 3. ...
      * </pre>
      *
-     * @param context 检索到的文档上下文
-     * @param history 对话历史（前端传入；可空/可少于 N 轮）
+     * @param context        检索到的文档上下文
+     * @param history        对话历史（前端传入；可空/可少于 N 轮）
      * @param currentMessage 用户当前消息
+     * @param historyWindow  注入 prompt 的历史轮数（来自 Conversation.historyWindow）
      */
-    private String buildPromptWithHistory(String context, List<ChatMessage> history, String currentMessage) {
+    public String buildPromptWithHistory(String context, List<ChatMessage> history, String currentMessage, int historyWindow) {
         StringBuilder historySection = new StringBuilder();
         // 空 history 走 fallback 路径（保持行为兼容）
         if (history == null || history.isEmpty()) {
             historySection.append("（这是新对话，无上文）");
         } else {
-            // 取最近 historyTurns * 2 条消息（每轮 user + assistant）
-            int n = Math.min(history.size(), historyTurns * 2);
+            // 取最近 historyWindow * 2 条消息（每轮 user + assistant）
+            int n = Math.min(history.size(), historyWindow * 2);
             int start = history.size() - n;
             for (int i = start; i < history.size(); i++) {
                 ChatMessage m = history.get(i);
@@ -498,66 +534,41 @@ public class RagService {
             6. 对于复杂问题，用分点或编号的方式回答
 
             === 回答 ===
-            """.formatted(historyTurns, historySection.toString(), context, currentMessage);
+            """.formatted(historyWindow, historySection.toString(), context, currentMessage);
     }
 
     /**
-     * 【2026-06-29 增量 P0-02】query rewriting（基于历史的查询重写）
+     * 【2026-06-29 增量 P0-02 / 2026-07-02 替换】query rewriting 已下沉到 {@link QueryRewriteService}
      *
-     * 问题背景：
-     *   多轮对话中，用户当前问题往往依赖上文：
-     *     user: "介绍一下产品A"
-     *     assistant: "产品A 是..."
-     *     user: "它有什么功能？"   ← 当前 query，embedding 模型不懂"它"
+     * 历史：此处曾经是简单的空格拼接实现。2026-07-02 替换为 LLM 改写（失败/超时降级到 simple 拼接）。
+     * 详见 {@link QueryRewriteService#rewrite(String, List, int)}。
      *
-     * 解决方案（轻量级，无需调用 LLM）：
-     *   把最近 N 轮 user 问题拼到当前 query 前面，让 embedding 模型看到上下文。
+     * <p>原实现保留在注释中以便回溯：
+     * <pre>{@code
+     * // 只取最近 historyTurns 个 user 消息
+     * List<String> recentUserMsgs = new ArrayList<>();
+     * for (int i = history.size() - 1; i >= 0 && recentUserMsgs.size() < historyTurns; i--) {
+     *     ChatMessage m = history.get(i);
+     *     if ("user".equals(m.getRole()) && m.getContent() != null && !m.getContent().isBlank()) {
+     *         recentUserMsgs.add(0, m.getContent());
+     *     }
+     * }
+     * StringBuilder sb = new StringBuilder();
+     * for (String msg : recentUserMsgs) {
+     *     if (sb.length() > 0) sb.append(" ");
+     *     sb.append(msg);
+     * }
+     * sb.append(" ").append(currentMessage);
+     * return sb.toString();
+     * }</pre>
      *
-     *   rewritten = "[last_user_msg_1] [last_user_msg_2] [current_msg]"
-     *
-     *   经过 embedding 后，向量空间里"它有什么功能"会被拉向"产品A 功能"附近。
-     *
-     * 不调用 LLM 做 query rewrite 的理由：
-     *   - 成本：每次都多一次 LLM 调用（$0.001-0.01）
-     *   - 延迟：+500ms-2s
-     *   - 效果：上述简单拼接已能解决 80%+ 的代词消解场景
-     *   - 后续如需要更复杂 rewrite（如 HyDE / Query2Doc），可单独迭代
-     *
-     * @param currentMessage 用户当前消息
-     * @param history 对话历史
-     * @return 重写后的查询（用空格拼接最近 N 轮 user 消息 + 当前消息）
+     * <p>设计权衡：保留 {@code rag.query.rewrite.mode=simple} 配置项即可一键回退到该拼接逻辑，
+     * 无需恢复此处代码。
      */
-    private String rewriteQueryWithHistory(String currentMessage, List<ChatMessage> history) {
-        if (history == null || history.isEmpty()) {
-            return currentMessage;
-        }
-
-        // 只取最近 historyTurns 个 user 消息
-        List<String> recentUserMsgs = new ArrayList<>();
-        for (int i = history.size() - 1; i >= 0 && recentUserMsgs.size() < historyTurns; i--) {
-            ChatMessage m = history.get(i);
-            if ("user".equals(m.getRole()) && m.getContent() != null && !m.getContent().isBlank()) {
-                recentUserMsgs.add(0, m.getContent());   // 保持时间正序
-            }
-        }
-
-        if (recentUserMsgs.isEmpty()) {
-            return currentMessage;
-        }
-
-        // 反向迭代添加（最新的 user 在最前），形成递进式上下文
-        StringBuilder sb = new StringBuilder();
-        for (String msg : recentUserMsgs) {
-            if (sb.length() > 0) sb.append(" ");
-            sb.append(msg);
-        }
-        sb.append(" ").append(currentMessage);
-        return sb.toString();
-    }
 
     /**
      * 解析向量字符串
-     * 
+     *
      * 数据库中向量存储格式为 "[0.1, 0.2, 0.3]"
      * 需要解析为 float[] 数组
      */

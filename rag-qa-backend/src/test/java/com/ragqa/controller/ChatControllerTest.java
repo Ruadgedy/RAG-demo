@@ -78,7 +78,7 @@ class ChatControllerTest {
         request.setKnowledgeBaseId(UUID.randomUUID());
 
         when(chatService.chat(any(ChatRequest.class)))
-                .thenReturn(new ChatResponse("session-123", "RAG 是检索增强生成...", List.of()));
+                .thenReturn(new ChatResponse("conv-123", "chat-123", "RAG 是检索增强生成...", List.of()));
 
         mockMvc.perform(post("/api/chat")
                         .with(authentication(new UsernamePasswordAuthenticationToken(
@@ -86,7 +86,7 @@ class ChatControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.sessionId").value("session-123"))
+                .andExpect(jsonPath("$.conversationId").value("conv-123"))
                 .andExpect(jsonPath("$.answer").value("RAG 是检索增强生成..."));
     }
 

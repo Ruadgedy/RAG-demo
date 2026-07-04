@@ -223,7 +223,7 @@ public class ChatService {
         RagService.ChatResult result;
         String chatId = UUID.randomUUID().toString();
         try {
-            result = ragService.chat(request.getMessage(), request.getKnowledgeBaseId(), history);
+            result = ragService.chat(request.getMessage(), request.getKnowledgeBaseId(), history, conv.getHistoryWindow());
         } catch (Exception e) {
             log.error("RAG 问答失败: conversationId={}", conversationId, e);
             return new ChatResponse(conversationId, chatId, "抱歉，AI服务暂时不可用，请稍后重试。", List.of());
@@ -232,7 +232,8 @@ public class ChatService {
         // 落库
         int turnIndex = chatHistoryRepository.getNextTurnIndex(conversationId);
         List<SourceRef> sources = buildSourceRefs(result.retrievedDocs());
-        String ragMetadataJson = buildRagMetadataJson(result.retrievedDocs(), result.retrievalDurationMs());
+        String ragMetadataJson = buildRagMetadataJson(
+                result.retrievedDocs(), result.retrievalDurationMs(), result.rewrittenQuery());
 
         saveTurn(conversationId, request.getKnowledgeBaseId(), userId,
                 request.getMessage(), result.answer(), ragMetadataJson, sources, turnIndex);
@@ -283,19 +284,20 @@ public class ChatService {
             // 获取历史
             List<ChatMessage> history = getHistory(conversationId, historyWindow);
 
-            // 检索
-            long retrievalStart = System.currentTimeMillis();
-            var docs = ragService.retrieveForStreaming(
-                    request.getMessage(), request.getKnowledgeBaseId(), history);
-            long retrievalDurationMs = System.currentTimeMillis() - retrievalStart;
+            // 检索（流式：retrieveForStreaming 返回 ChatResult 含 rewrittenQuery）
+            RagService.ChatResult retrievalResult = ragService.retrieveForStreaming(
+                    request.getMessage(), request.getKnowledgeBaseId(), history, historyWindow);
+            List<RagService.RetrievalResult> docs = retrievalResult.retrievedDocs();
+            long retrievalDurationMs = retrievalResult.retrievalDurationMs();
+            String rewrittenQuery = retrievalResult.rewrittenQuery();
 
             if (docs.isEmpty()) {
-                return handleEmptyKnowledgeBase(conversationId, request, userId, retrievalDurationMs);
+                return handleEmptyKnowledgeBase(conversationId, request, userId, retrievalDurationMs, rewrittenQuery);
             }
 
             // 构建 prompt
             String context = buildContext(docs);
-            String prompt = buildPromptWithHistory(context, history, request.getMessage());
+            String prompt = ragService.buildPromptWithHistory(context, history, request.getMessage(), historyWindow);
 
             // 获取 turnIndex
             int turnIndex = chatHistoryRepository.getNextTurnIndex(conversationId);
@@ -313,6 +315,7 @@ public class ChatService {
 
             final long finalRetrievalDurationMs = retrievalDurationMs;
             final List<RagService.RetrievalResult> finalDocs = docs;
+            final String finalRewrittenQuery = rewrittenQuery;
             StringBuilder accumulator = new StringBuilder();
 
             return Flux.concat(
@@ -330,7 +333,8 @@ public class ChatService {
                                 Mono.fromRunnable(() -> {
                                     String fullAnswer = accumulator.toString();
                                     List<SourceRef> sources = buildSourceRefs(finalDocs);
-                                    String ragMetadataJson = buildRagMetadataJson(finalDocs, finalRetrievalDurationMs);
+                                    String ragMetadataJson = buildRagMetadataJson(
+                                            finalDocs, finalRetrievalDurationMs, finalRewrittenQuery);
 
                                     ChatHistory chatRecord = new ChatHistory();
                                     chatRecord.setConversationId(conversationId);
@@ -391,15 +395,16 @@ public class ChatService {
 
         RagService.ChatResult result;
         try {
-            result = ragService.chat(request.getMessage(), request.getKnowledgeBaseId(), history);
+            result = ragService.chat(request.getMessage(), request.getKnowledgeBaseId(), history, historyWindow);
         } catch (Exception e) {
             log.error("非流式回退失败", e);
-            result = new RagService.ChatResult("抱歉，AI服务暂时不可用，请稍后重试。", List.of(), 0L);
+            result = new RagService.ChatResult("抱歉，AI服务暂时不可用，请稍后重试。", List.of(), 0L, request.getMessage());
         }
 
         int turnIndex = chatHistoryRepository.getNextTurnIndex(conversationId);
         List<SourceRef> sources = buildSourceRefs(result.retrievedDocs());
-        String ragMetadataJson = buildRagMetadataJson(result.retrievedDocs(), result.retrievalDurationMs());
+        String ragMetadataJson = buildRagMetadataJson(
+                result.retrievedDocs(), result.retrievalDurationMs(), result.rewrittenQuery());
 
         saveTurn(conversationId, request.getKnowledgeBaseId(), userId,
                 request.getMessage(), result.answer(), ragMetadataJson, sources, turnIndex);
@@ -422,12 +427,14 @@ public class ChatService {
 
     private Flux<ServerSentEvent<String>> handleEmptyKnowledgeBase(String conversationId,
                                                                     ChatRequest request, String userId,
-                                                                    long retrievalDurationMs) {
+                                                                    long retrievalDurationMs,
+                                                                    String rewrittenQuery) {
         String emptyMsg = "该知识库暂无文档，请先上传文档。";
         int turnIndex = chatHistoryRepository.getNextTurnIndex(conversationId);
 
         saveTurn(conversationId, request.getKnowledgeBaseId(), userId,
-                request.getMessage(), emptyMsg, buildRagMetadataJson(List.of(), retrievalDurationMs),
+                request.getMessage(), emptyMsg,
+                buildRagMetadataJson(List.of(), retrievalDurationMs, rewrittenQuery),
                 List.of(), turnIndex);
 
         if (turnIndex == 0) {
@@ -463,7 +470,22 @@ public class ChatService {
         }
     }
 
-    private String buildRagMetadataJson(List<RagService.RetrievalResult> retrievedDocs, long retrievalDurationMs) {
+    /**
+     * 构造 rag_metadata JSON 字符串
+     *
+     * <p>【2026-07-02 增量】增加 {@code rewritten_query} 字段：
+     * <ul>
+     *   <li>记录 LLM 改写后的检索 query（与 user 原始提问区分）</li>
+     *   <li>便于后续检索质量评估、A/B 对比改写效果</li>
+     *   <li>首轮/无改写时为空字符串</li>
+     * </ul>
+     *
+     * @param retrievedDocs      检索结果（可能为空）
+     * @param retrievalDurationMs 检索耗时
+     * @param rewrittenQuery      LLM/Simple 改写后的检索 query（可空）
+     */
+    private String buildRagMetadataJson(List<RagService.RetrievalResult> retrievedDocs,
+                                        long retrievalDurationMs, String rewrittenQuery) {
         if (retrievedDocs == null) retrievedDocs = List.of();
         try {
             List<String> docIds = retrievedDocs.stream()
@@ -476,6 +498,9 @@ public class ChatService {
             meta.put("retrieved_chunk_count", retrievedDocs.size());
             meta.put("retrieved_doc_ids", docIds);
             meta.put("retrieval_duration_ms", retrievalDurationMs);
+            // 改写后的检索 query：与 user 原始提问分开存，便于评估改写对检索的提升
+            // 改写失败降级 simple / 首轮无历史时，等于 user 原始 query
+            meta.put("rewritten_query", rewrittenQuery == null ? "" : rewrittenQuery);
 
             return objectMapper.writeValueAsString(meta);
         } catch (JsonProcessingException e) {
@@ -531,45 +556,6 @@ public class ChatService {
             sb.append(r.content()).append("\n\n");
         }
         return sb.toString();
-    }
-
-    private String buildPromptWithHistory(String context, List<ChatMessage> history, String currentMessage) {
-        StringBuilder historySection = new StringBuilder();
-        if (history == null || history.isEmpty()) {
-            historySection.append("（这是新对话，无上文）");
-        } else {
-            int n = Math.min(history.size(), 6);
-            int start = history.size() - n;
-            for (int i = start; i < history.size(); i++) {
-                ChatMessage m = history.get(i);
-                String roleLabel = "user".equals(m.getRole()) ? "用户" : "助手";
-                String content = truncate(m.getContent(), 500);
-                historySection.append(roleLabel).append(": ").append(content).append("\n");
-            }
-        }
-
-        return """
-            你是一个专业的智能问答助手，擅长从提供的文档中准确提取信息并清晰回答用户问题。
-
-            === 对话历史（最近 %d 轮）===
-            %s
-
-            === 参考文档 ===
-            %s
-
-            === 用户当前问题 ===
-            %s
-
-            === 回答要求 ===
-            1. **优先结合对话历史理解指代**：用户当前问题中的"它/那个/前一条"等代词，先在历史中找到指代对象
-            2. 只基于参考文档内容回答，不要编造信息
-            3. 如果文档中没有相关信息，回答："抱歉，知识库中没有找到与您问题相关的内容。"
-            4. 引用文档时使用【文档X】标注来源
-            5. 回答结构：先给出结论，再引用证据，最后补充说明（如有）
-            6. 对于复杂问题，用分点或编号的方式回答
-
-            === 回答 ===
-            """.formatted(history.size() / 2, historySection.toString(), context, currentMessage);
     }
 
     private String truncate(String s, int max) {

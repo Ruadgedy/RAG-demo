@@ -223,7 +223,7 @@ public class EvalService {
         // 1. 检索阶段（计时）— 不带历史，多轮对话评测时 history 为空
         long retrStart = System.currentTimeMillis();
         List<RagService.RetrievalResult> retrieved = ragService.retrieveForStreaming(
-                item.getQuestion(), kbId, List.<ChatMessage>of());
+                item.getQuestion(), kbId, List.<ChatMessage>of(), 0).retrievedDocs();
         long retrievalMs = System.currentTimeMillis() - retrStart;
         entity.setRetrievalMs((int) retrievalMs);
 
@@ -248,7 +248,7 @@ public class EvalService {
         String answer;
         try {
             RagService.ChatResult result = ragService.chat(
-                    item.getQuestion(), kbId, List.<ChatMessage>of());
+                    item.getQuestion(), kbId, List.<ChatMessage>of(), 0);
             answer = result.answer();
         } catch (Exception e) {
             log.warn("单条 LLM 生成失败: {}", e.getMessage());
