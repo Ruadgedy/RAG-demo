@@ -3,6 +3,7 @@ package com.ragqa.service;
 import com.ragqa.dto.ChatRequest;
 import com.ragqa.dto.ChatResponse;
 import com.ragqa.model.Conversation;
+import com.ragqa.agent.AgenticRagService;
 import com.ragqa.repository.ChatHistoryRepository;
 import com.ragqa.repository.ConversationRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -47,11 +48,14 @@ class ChatServiceTest {
     @Mock
     private ConversationRepository conversationRepository;
 
+    @Mock
+    private AgenticRagService agenticRagService;
+
     private ChatService chatService;
 
     @BeforeEach
     void setUp() {
-        chatService = new ChatService(ragService, chatClientBuilder, chatHistoryRepository, conversationRepository);
+        chatService = new ChatService(ragService, chatClientBuilder, chatHistoryRepository, conversationRepository, agenticRagService);
 
         // 设置认证上下文（ChatService.getCurrentUserId 需要）
         org.springframework.security.core.context.SecurityContextHolder.getContext().setAuthentication(

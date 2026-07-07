@@ -200,6 +200,36 @@ public class ConversationController {
         return ResponseEntity.ok(toDto(conv));
     }
 
+    /**
+     * 更新对话的 RAG 模式（Agentic RAG F20）
+     * linear = 传统 RAG 流水线；agentic = LLM 自主编排工具
+     * 传 null 恢复全局默认值
+     */
+    @Operation(summary = "切换 RAG 模式", description = "per-conversation 切换传统/智能体模式；传 null 恢复全局默认值")
+    @PatchMapping("/{id}/rag-mode")
+    public ResponseEntity<ConversationDto> updateRagMode(
+            @Parameter(description = "对话组ID") @PathVariable String id,
+            @RequestBody Map<String, String> body) {
+
+        String userId = getCurrentUserId();
+        String ragMode = body.get("ragMode"); // null=恢复默认值，linear|agentic
+
+        // 校验合法值
+        if (ragMode != null && !ragMode.isBlank()
+                && !ragMode.equals("linear") && !ragMode.equals("agentic")) {
+            throw new IllegalArgumentException("ragMode 必须是 linear | agentic 或不传（恢复默认）");
+        }
+
+        Conversation conv = conversationRepository.findByIdAndUserId(id, userId)
+                .orElseThrow(() -> new IllegalArgumentException("对话组不存在: " + id));
+
+        conv.setRagMode(ragMode); // null=恢复全局默认值
+        conv = conversationRepository.save(conv);
+        log.info("[rag-mode] 切换: conversationId={}, ragMode={}", id, ragMode);
+
+        return ResponseEntity.ok(toDto(conv));
+    }
+
     // ==================== 私有方法 ====================
 
     private String getCurrentUserId() {
@@ -218,6 +248,7 @@ public class ConversationController {
         dto.setFirstQuery(conv.getFirstQuery());
         dto.setKnowledgeBaseId(conv.getKnowledgeBaseId());
         dto.setHistoryWindow(conv.getHistoryWindow());
+        dto.setRagMode(conv.getRagMode());
         dto.setCreatedAt(conv.getCreatedAt());
         dto.setUpdatedAt(conv.getUpdatedAt());
 

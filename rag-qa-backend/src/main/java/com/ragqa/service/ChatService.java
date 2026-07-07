@@ -2,6 +2,7 @@ package com.ragqa.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ragqa.agent.AgenticRagService;
 import com.ragqa.dto.ChatMessage;
 import com.ragqa.dto.ChatRequest;
 import com.ragqa.dto.ChatResponse;
@@ -67,6 +68,12 @@ public class ChatService {
     /** 默认滑动窗口大小 */
     @Value("${rag.history.turns:3}")
     private int defaultHistoryWindow;
+
+    /** 全局 RAG 模式默认值；conversation.rag_mode 非 null 时 per-conversation 覆盖 */
+    @Value("${rag.mode:linear}")
+    private String globalRagMode;
+
+    private final AgenticRagService agenticRagService;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -219,11 +226,17 @@ public class ChatService {
         // 获取历史（滑动窗口）
         List<ChatMessage> history = getHistory(conversationId, conv.getHistoryWindow());
 
-        // 执行问答
+        // 执行问答（按 ragMode 路由：conversation.ragMode > 全局 rag.mode 默认值）
         RagService.ChatResult result;
         String chatId = UUID.randomUUID().toString();
+        String ragMode = conv.getRagMode() != null ? conv.getRagMode() : globalRagMode;
         try {
-            result = ragService.chat(request.getMessage(), request.getKnowledgeBaseId(), history, conv.getHistoryWindow());
+            if ("agentic".equals(ragMode)) {
+                log.info("[rag路由] agentic: conversationId={}", conversationId);
+                result = agenticRagService.chat(request.getMessage(), request.getKnowledgeBaseId(), history, conv.getHistoryWindow());
+            } else {
+                result = ragService.chat(request.getMessage(), request.getKnowledgeBaseId(), history, conv.getHistoryWindow());
+            }
         } catch (Exception e) {
             log.error("RAG 问答失败: conversationId={}", conversationId, e);
             return new ChatResponse(conversationId, chatId, "抱歉，AI服务暂时不可用，请稍后重试。", List.of());
@@ -284,9 +297,17 @@ public class ChatService {
             // 获取历史
             List<ChatMessage> history = getHistory(conversationId, historyWindow);
 
-            // 检索（流式：retrieveForStreaming 返回 ChatResult 含 rewrittenQuery）
-            RagService.ChatResult retrievalResult = ragService.retrieveForStreaming(
+            // 检索（按 ragMode 路由：conversation.ragMode > 全局 rag.mode）
+            String ragMode = conv.getRagMode() != null ? conv.getRagMode() : globalRagMode;
+            RagService.ChatResult retrievalResult;
+            if ("agentic".equals(ragMode)) {
+                log.info("[rag路由] agentic(stream): conversationId={}", conversationId);
+                retrievalResult = agenticRagService.retrieveForStreaming(
+                        request.getMessage(), request.getKnowledgeBaseId(), history, historyWindow);
+            } else {
+                retrievalResult = ragService.retrieveForStreaming(
                     request.getMessage(), request.getKnowledgeBaseId(), history, historyWindow);
+            }
             List<RagService.RetrievalResult> docs = retrievalResult.retrievedDocs();
             long retrievalDurationMs = retrievalResult.retrievalDurationMs();
             String rewrittenQuery = retrievalResult.rewrittenQuery();

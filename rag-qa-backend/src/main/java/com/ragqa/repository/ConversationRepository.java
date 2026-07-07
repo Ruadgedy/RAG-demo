@@ -2,6 +2,7 @@ package com.ragqa.repository;
 
 import com.ragqa.model.Conversation;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -53,4 +54,15 @@ public interface ConversationRepository extends JpaRepository<Conversation, Stri
         ORDER BY c.updated_at DESC
         """, nativeQuery = true)
     List<Conversation> findConversationsWithLatestMessage(@Param("userId") String userId);
+
+    /**
+     * 更新对话的 rag_mode（Agentic RAG F20：per-conversation 切换模式）
+     * @param id      conversation id
+     * @param userId  防越权校验
+     * @param ragMode 新模式：linear | agentic；传 null 表示恢复全局默认值
+     * @return 更新行数（0=不存在或越权）
+     */
+    @Modifying
+    @Query("UPDATE Conversation c SET c.ragMode = :ragMode WHERE c.id = :id AND c.userId = :userId")
+    int updateRagMode(@Param("id") String id, @Param("userId") String userId, @Param("ragMode") String ragMode);
 }

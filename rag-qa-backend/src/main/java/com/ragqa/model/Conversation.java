@@ -50,6 +50,14 @@ public class Conversation {
     @Column(name = "history_window")
     private Integer historyWindow = 3;
 
+    /**
+     * 对话级 RAG 模式（per-conversation 覆盖全局 rag.mode）。
+     * nullable：null 时继承全局 rag.mode 默认值（linear）
+     * 可选值：linear（传统 RAG 流水线）| agentic（LLM 自主编排工具）
+     */
+    @Column(name = "rag_mode", length = 16)
+    private String ragMode;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

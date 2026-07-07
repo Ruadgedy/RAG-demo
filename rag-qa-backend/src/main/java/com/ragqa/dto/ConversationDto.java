@@ -21,6 +21,7 @@ public class ConversationDto {
     private String firstQuery;      // 第一轮原始提问
     private String knowledgeBaseId;
     private Integer historyWindow;  // 滑动窗口大小
+    private String ragMode;         // RAG 模式：linear|agentic；null=继承全局默认值
     private Integer turnCount;      // 对话轮次
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
