@@ -234,7 +234,7 @@ public class RagService {
      * @param knowledgeBaseId 知识库ID
      * @return 检索结果列表（最多 TOP_K 条，已 rerank 排序）
      */
-    private List<RetrievalResult> retrieve(String query, UUID knowledgeBaseId) {
+    public List<RetrievalResult> retrieve(String query, UUID knowledgeBaseId) {
         try {
             // 1. 召回：从 Chroma 拉取较多候选（默认 20 个）
             // 用 candidatesTopK 而不是 TOP_K，给 rerank 留出挑选空间
