@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- F22 (2026-07-07): EvalService A/B 对比 + Wave 1 ST 测试用例
+  - `EvalService.abCompare(question, kbId, history, historyWindow)` → AbCompareResult 双侧产物对比报告
+  - `ModeOutcome` record（answer / latencyMs / retrievedChunkCount / sourceCount / agentRounds / degraded / error）
+  - `POST /api/admin/eval/ab` REST 入口（同步返回 AbCompareResult）
+  - `EvalServiceAbCompareTest` 3 例：双成功 / agentic 降级 / linear 异常吞噬
+  - 6 篇 Wave 1 ST 用例（feature-17~22），覆盖 FR-012~014 验收标准
+  - 单边失败隔离：linear 抛了不阻塞 agentic；`ab-` 前缀 chatId 与真实对话区分
+  - 测试：111/111 全过
 - F23 (2026-07-07): 前端对话模式切换 UI（per-conversation）
   - 后端 `GET /api/config` 暴露全局 `rag.mode` / `defaultHistoryWindow`，避免前端硬编码
   - 前端 `RagModeToggle.vue` 两-pill 切换组件（lucide ListOrdered + Sparkles），agentic 选中态用品牌渐变

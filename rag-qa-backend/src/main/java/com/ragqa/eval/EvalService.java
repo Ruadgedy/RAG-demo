@@ -1,6 +1,7 @@
 package com.ragqa.eval;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ragqa.agent.AgenticRagService;
 import com.ragqa.dto.ChatMessage;
 import com.ragqa.model.Document;
 import com.ragqa.model.EvalRun;
@@ -49,6 +50,10 @@ public class EvalService {
     private final RetrievalEvaluator retrievalEvaluator;
     private final AnswerEvaluator answerEvaluator;
     private final RagService ragService;
+    /**
+     * 【2026-07-07 F22】agentic RAG 服务 —— 给 A/B 对比用。
+     */
+    private final AgenticRagService agenticRagService;
     private final DocumentRepository documentRepository;
     private final EvalRunRepository evalRunRepository;
     private final EvalRunItemRepository evalRunItemRepository;
@@ -80,6 +85,117 @@ public class EvalService {
         private int totalItems;
         private int errorCount;
         private long totalDurationMs;
+    }
+
+    // ============================================================
+    // 【2026-07-07 F22】A/B 对比：同题 linear vs agentic
+    // ============================================================
+
+    /**
+     * 单边运行结果（linear / agentic 任一模式的产物）。
+     *
+     * <p>{@code error} 非空表示该侧失败，{@code answer} 为 null；
+     * 仍能产出对比报告，方便排查单边故障。
+     */
+    public record ModeOutcome(
+            String mode,                  // "linear" | "agentic"
+            String answer,
+            long latencyMs,
+            int retrievedChunkCount,
+            int sourceCount,              // distinct fileName 数
+            Integer agentRounds,          // 仅 agentic 模式有意义，linear 为 null
+            Boolean degraded,             // 仅 agentic 模式有意义：是否降级到 linear
+            String error                  // null = OK
+    ) {
+        public boolean isOk() { return error == null; }
+    }
+
+    /**
+     * A/B 对比报告。
+     */
+    public record AbCompareResult(
+            String question,
+            String kbId,
+            long timestamp,
+            ModeOutcome linear,
+            ModeOutcome agentic
+    ) {}
+
+    /**
+     * 同题对比 linear vs agentic 模式。
+     *
+     * <p>两条路径独立执行、独立计时、单边失败不影响对侧产出。
+     * agentic 内部如超时/异常会自身降级到 linear，对比报告的
+     * {@code agentic.degraded=true} 会标出此情况。
+     *
+     * @param question         用户提问
+     * @param kbId             知识库 ID
+     * @param history          多轮历史（可空）
+     * @param historyWindow    历史窗口
+     * @return AbCompareResult（含双模式产出 + 耗时 + 错误）
+     */
+    public AbCompareResult abCompare(String question, UUID kbId,
+                                     List<ChatMessage> history, int historyWindow) {
+        long ts = System.currentTimeMillis();
+        // 顺序执行：避免 agentic 内部线程池 + ThreadLocal 与并行请求产生竞争
+        ModeOutcome linear = runLinearOutcome(question, kbId, history, historyWindow);
+        ModeOutcome agentic = runAgenticOutcome(question, kbId, history, historyWindow);
+        return new AbCompareResult(question, kbId.toString(), ts, linear, agentic);
+    }
+
+    private ModeOutcome runLinearOutcome(String question, UUID kbId,
+                                         List<ChatMessage> history, int historyWindow) {
+        long start = System.currentTimeMillis();
+        try {
+            RagService.ChatResult result = ragService.chat(question, kbId, history, historyWindow);
+            long latency = System.currentTimeMillis() - start;
+            int chunkCount = result.retrievedDocs() == null ? 0 : result.retrievedDocs().size();
+            int sourceCount = result.retrievedDocs() == null ? 0
+                    : (int) result.retrievedDocs().stream()
+                    .map(RagService.RetrievalResult::fileName)
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .count();
+            return new ModeOutcome("linear", result.answer(),
+                    latency, chunkCount, sourceCount,
+                    null, null, null);
+        } catch (Exception e) {
+            log.warn("[ab:linear] 失败: {}", e.getMessage());
+            return new ModeOutcome("linear", null,
+                    System.currentTimeMillis() - start, 0, 0,
+                    null, null, e.getMessage());
+        }
+    }
+
+    private ModeOutcome runAgenticOutcome(String question, UUID kbId,
+                                          List<ChatMessage> history, int historyWindow) {
+        long start = System.currentTimeMillis();
+        // F21：abCompare 用一个固定的 chatId，A/B 报告不需要持久化到 agent_trace 表
+        String abChatId = "ab-" + java.util.UUID.randomUUID();
+        try {
+            RagService.ChatResult result = agenticRagService.chat(
+                    abChatId, question, kbId, history, historyWindow);
+            long latency = System.currentTimeMillis() - start;
+            int chunkCount = result.retrievedDocs() == null ? 0 : result.retrievedDocs().size();
+            int sourceCount = result.retrievedDocs() == null ? 0
+                    : (int) result.retrievedDocs().stream()
+                    .map(RagService.RetrievalResult::fileName)
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .count();
+            return new ModeOutcome(
+                    "agentic",
+                    result.answer(),
+                    latency, chunkCount, sourceCount,
+                    result.agentRounds(),
+                    result.degraded(),
+                    null);
+        } catch (Exception e) {
+            log.warn("[ab:agentic] 失败: {}", e.getMessage());
+            return new ModeOutcome("agentic", null,
+                    System.currentTimeMillis() - start, 0, 0,
+                    null, null, e.getMessage());
+        }
     }
 
     /**

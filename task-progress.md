@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 16/22 · Last: F23 前端 mode toggle UI · Next: F22 Eval A/B + ST 测试用例（F21/F23 ST 用例已出）
+Progress: 16/22 · Last: F22 Eval A/B + Wave 1 ST 测试用例 · Next: (Wave 1 收尾；后续按需触发下一次 Increment)
 
 ---
 
@@ -138,3 +138,27 @@ Progress: 16/22 · Last: F23 前端 mode toggle UI · Next: F22 Eval A/B + ST �
 
 **Documents updated**: docs/PR/PR-2026-07-07-f23-frontend-mode-toggle.md、docs/test-cases/feature-23-frontend-mode-toggle.md
 **Next**: F22 Eval A/B linear vs agentic + docs/test-cases/feature-17~21.md 一组 ST 用例
+
+### Session 8 — F22 Eval A/B + Wave 1 ST 测试用例 (2026-07-07)
+
+**Phase**: Worker（评估能力 + 系统测试收尾）
+**Scope**: Wave 1 闭环（FR-012/013/014 评估与回归）
+
+**完成内容**：
+- ✅ EvalService.abCompare(question, kbId, history, historyWindow) → AbCompareResult（双侧产物 + 单边失败隔离）
+- ✅ ModeOutcome + AbCompareResult 嵌套 record（清晰的报告字段）
+- ✅ EvalController `POST /api/admin/eval/ab` REST 入口
+- ✅ EvalServiceAbCompareTest 3 例：双成功 / agentic 降级 / linear 异常吞噬
+- ✅ 6 篇 Wave 1 ST 用例（feature-17/18/19/20/21/22）：覆盖 FR-012~014 验收标准
+- ✅ mvn test 111/111 全过（+3 F22）
+
+**关键决策**：A/B 串行执行（避免 agentic 线程池+ThreadLocal 竞争）；ab- 前缀 chatId 与真实对话区分；单边 try/catch 不阻塞对侧
+
+**Wave 1 整体落地**：
+| Feature | 实现 commit | ST 用例 |
+|---|---|---|
+| F17~F22 | 59c86e4 / 886f7d1 / 3d8ee12 / 1d4b106 / eccf4db / 本 PR | feature-17~22 ✨ |
+| F23 前端 UI | cd36912 | feature-23 ✨ |
+
+**Documents updated**: docs/PR/PR-2026-07-07-f22-eval-ab-st-cases.md、6 篇 docs/test-cases/feature-17~22.md
+**Next**: (Wave 1 收尾；feature-list.json F17~F22 状态翻 passing 由 ST 执行确认 + feature-list.json 更新流程触发)

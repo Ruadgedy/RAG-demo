@@ -1,5 +1,6 @@
 package com.ragqa.eval;
 
+import com.ragqa.dto.ChatMessage;
 import com.ragqa.model.EvalRun;
 import com.ragqa.model.EvalRunItem;
 import com.ragqa.repository.EvalRunItemRepository;
@@ -12,6 +13,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * 评估 REST 接口
@@ -78,5 +80,40 @@ public class EvalController {
     @GetMapping("/run/{id}/items")
     public List<EvalRunItem> getItems(@PathVariable String id) {
         return itemRepository.findByRunId(id);
+    }
+
+    /**
+     * 【2026-07-07 F22】A/B 对比接口：同题 linear vs agentic。
+     *
+     * <p>Body:
+     * <pre>
+     * {
+     *   "question": "产品A价格",     // 必填
+     *   "kbId": "uuid",             // 必填
+     *   "historyWindow": 3          // 可选，默认 3
+     * }
+     * </pre>
+     *
+     * <p>返回 {@link EvalService.AbCompareResult}：双模式产物 + 耗时 + 错误。
+     * 单边失败不影响对侧产出，devtools / ST 用例可即时查看对比。
+     */
+    @PostMapping("/ab")
+    public ResponseEntity<?> abCompare(@RequestBody Map<String, Object> body) {
+        String question = body.get("question") == null ? null : body.get("question").toString();
+        String kbIdStr = body.get("kbId") == null ? null : body.get("kbId").toString();
+        int historyWindow = body.get("historyWindow") == null ? 3
+                : ((Number) body.get("historyWindow")).intValue();
+        if (question == null || question.isBlank() || kbIdStr == null || kbIdStr.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "question 和 kbId 必填"));
+        }
+        try {
+            EvalService.AbCompareResult result = evalService.abCompare(
+                    question, UUID.fromString(kbIdStr), List.<ChatMessage>of(), historyWindow);
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            log.error("[eval:ab] 失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body(Map.of(
+                    "error", "A/B 对比失败: " + e.getMessage()));
+        }
     }
 }
