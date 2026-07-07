@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 16/22 · Last: Increment Wave 1 (Agentic RAG) · Next: Feature #17 (Tool 抽象 + KnowledgeBaseSearchTool)
+Progress: 16/22 · Last: F21 agent_trace 落库 + SSE agent_step · Next: F22 Eval A/B + ST 测试用例
 
 ---
 
@@ -75,7 +75,7 @@ Progress: 16/22 · Last: Increment Wave 1 (Agentic RAG) · Next: Feature #17 (To
 
 **总计：16/16 features passed**
 
-### Session 5 — Increment Wave 1 (Agentic RAG) (2026-07-03)
+### Session 5 — Increment Wave 1 (Agentic RAG) 设计+PoC (2026-07-03)
 
 **Phase**: Increment
 **Scope**: 升级到 Agentic RAG（P1+P2）—— Tool 抽象 + 多源检索 + agent loop + trace 落库
@@ -91,3 +91,28 @@ Progress: 16/22 · Last: Increment Wave 1 (Agentic RAG) · Next: Feature #17 (To
 
 **Documents updated**: SRS, Design, feature-list.json, .env.example
 **Next**: Worker cycles 实现 F17-F22（TDD，按 long-task-guide Red→Green→Coverage→Mutation→Persist）
+
+### Session 6 — F21 agent_trace 落库 + SSE agent_step + degraded (2026-07-07)
+
+**Phase**: Worker (TDD Red→Green→Persist)
+**Scope**: Wave 1 内 F21 闭环（FR-014 Agent 可观测）
+
+**完成内容**：
+- ✅ Flyway V8：建 `agent_trace` 表（chat_id / round / tool_name / tool_args / result_summary / duration_ms / status）+ 双索引
+- ✅ `AgentTrace` / `AgentTraceRepository` / `AgentTraceCollector` + `TraceContext` ThreadLocal
+- ✅ 三个 Tool 埋点（start / done 两条 record / 调用），注入 collector
+- ✅ `RagService.ChatResult` 扩展 `agentMode` / `agentRounds` / `degraded` 字段（4 参构造委托兼容 linear）
+- ✅ `AgenticRagService` 注入 collector，签名加 `chatId`，`markDegraded()` 降级标记
+- ✅ `ChatService` 一次性生成 `chatId`（agent + DB 对齐），流式路径推 SSE `agent_step` 事件
+- ✅ `buildRagMetadataJson` 加 `agent_mode` / `agent_rounds` / `degraded` 三键
+- ✅ `AgentTraceCollectorTest` 6 例 / `AgenticRagServiceTest` 5 例更新（含新断言）
+
+**测试结果**：
+- F21 新增 + 改动：24/24 单测通过
+- 全量回归：mvn test → `Tests run: 106, Failures: 0, Errors: 0, Skipped: 4`（4 个跳过是 PoC @EnabledIfSystemProperty 守护）
+- linear 路径行为不变（4 参 ChatResult 委托构造 hard-code mode=linear）
+
+**关键决策**：chatId 唯一性贯穿 ChatService；trace 落库失败 catch + log warn 不拖垮主链路；degraded=true 表"agentic 触发但实际跑 linear"
+
+**Documents updated**: docs/PR/PR-2026-07-07-f21-agent-trace.md
+**Next**: F22 Eval A/B + ST 测试用例 / docs/test-cases/feature-21.md

@@ -3,6 +3,8 @@ package com.ragqa.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ragqa.agent.AgenticRagService;
+import com.ragqa.agent.trace.AgentTrace;
+import com.ragqa.agent.trace.AgentTraceCollector;
 import com.ragqa.dto.ChatMessage;
 import com.ragqa.dto.ChatRequest;
 import com.ragqa.dto.ChatResponse;
@@ -56,6 +58,7 @@ public class ChatService {
     private final ChatClient.Builder chatClientBuilder;
     private final ChatHistoryRepository chatHistoryRepository;
     private final ConversationRepository conversationRepository;
+    private final AgentTraceCollector agentTraceCollector;
 
     /** 是否启用流式输出 */
     @Value("${chat.streaming:true}")
@@ -176,13 +179,16 @@ public class ChatService {
 
     /**
      * 保存一轮问答
+     *
+     * @param chatId 预生成的 chatId，同时写入 chat_history.chat_id 与 agent_trace.chat_id
+     *               （F21：保证 trace 行能与本轮 chat_history 行 join 起来）
      */
-    private ChatHistory saveTurn(String conversationId, UUID knowledgeBaseId, String userId,
+    private ChatHistory saveTurn(String chatId, String conversationId, UUID knowledgeBaseId, String userId,
                                   String query, String content, String ragMetadataJson,
                                   List<SourceRef> sources, int turnIndex) {
         ChatHistory history = new ChatHistory();
         history.setConversationId(conversationId);
-        history.setChatId(UUID.randomUUID().toString());
+        history.setChatId(chatId);
         history.setTurnIndex(turnIndex);
         history.setKnowledgeBaseId(knowledgeBaseId != null ? knowledgeBaseId.toString() : null);
         history.setUserId(userId);
@@ -226,14 +232,16 @@ public class ChatService {
         // 获取历史（滑动窗口）
         List<ChatMessage> history = getHistory(conversationId, conv.getHistoryWindow());
 
+        // chatId 唯一生成一次：F21 让 agent_trace.chat_id 与 chat_history.chat_id 对齐
+        String chatId = UUID.randomUUID().toString();
+
         // 执行问答（按 ragMode 路由：conversation.ragMode > 全局 rag.mode 默认值）
         RagService.ChatResult result;
-        String chatId = UUID.randomUUID().toString();
         String ragMode = conv.getRagMode() != null ? conv.getRagMode() : globalRagMode;
         try {
             if ("agentic".equals(ragMode)) {
-                log.info("[rag路由] agentic: conversationId={}", conversationId);
-                result = agenticRagService.chat(request.getMessage(), request.getKnowledgeBaseId(), history, conv.getHistoryWindow());
+                log.info("[rag路由] agentic: conversationId={}, chatId={}", conversationId, chatId);
+                result = agenticRagService.chat(chatId, request.getMessage(), request.getKnowledgeBaseId(), history, conv.getHistoryWindow());
             } else {
                 result = ragService.chat(request.getMessage(), request.getKnowledgeBaseId(), history, conv.getHistoryWindow());
             }
@@ -246,9 +254,10 @@ public class ChatService {
         int turnIndex = chatHistoryRepository.getNextTurnIndex(conversationId);
         List<SourceRef> sources = buildSourceRefs(result.retrievedDocs());
         String ragMetadataJson = buildRagMetadataJson(
-                result.retrievedDocs(), result.retrievalDurationMs(), result.rewrittenQuery());
+                result.retrievedDocs(), result.retrievalDurationMs(), result.rewrittenQuery(),
+                result.agentMode(), result.agentRounds(), result.degraded());
 
-        saveTurn(conversationId, request.getKnowledgeBaseId(), userId,
+        saveTurn(chatId, conversationId, request.getKnowledgeBaseId(), userId,
                 request.getMessage(), result.answer(), ragMetadataJson, sources, turnIndex);
 
         // 第一轮生成标题
@@ -258,8 +267,9 @@ public class ChatService {
             ).subscribeOn(Schedulers.boundedElastic()).subscribe();
         }
 
-        log.info("问答完成: conversationId={}, turnIndex={}, retrievedDocs={}",
-                conversationId, turnIndex, result.retrievedDocs().size());
+        log.info("问答完成: conversationId={}, turnIndex={}, retrievedDocs={}, agentMode={}, rounds={}, degraded={}",
+                conversationId, turnIndex, result.retrievedDocs().size(),
+                result.agentMode(), result.agentRounds(), result.degraded());
 
         return new ChatResponse(conversationId, chatId, result.answer(), sources);
     }
@@ -297,13 +307,18 @@ public class ChatService {
             // 获取历史
             List<ChatMessage> history = getHistory(conversationId, historyWindow);
 
+            // F21：chatId 一次性生成，同时供 agent trace 关联与 DB chat_history.chat_id 写入
+            int turnIndex = chatHistoryRepository.getNextTurnIndex(conversationId);
+            final String chatId = UUID.randomUUID().toString();
+            final int finalTurnIndex = turnIndex;
+
             // 检索（按 ragMode 路由：conversation.ragMode > 全局 rag.mode）
             String ragMode = conv.getRagMode() != null ? conv.getRagMode() : globalRagMode;
             RagService.ChatResult retrievalResult;
             if ("agentic".equals(ragMode)) {
-                log.info("[rag路由] agentic(stream): conversationId={}", conversationId);
+                log.info("[rag路由] agentic(stream): conversationId={}, chatId={}", conversationId, chatId);
                 retrievalResult = agenticRagService.retrieveForStreaming(
-                        request.getMessage(), request.getKnowledgeBaseId(), history, historyWindow);
+                        chatId, request.getMessage(), request.getKnowledgeBaseId(), history, historyWindow);
             } else {
                 retrievalResult = ragService.retrieveForStreaming(
                     request.getMessage(), request.getKnowledgeBaseId(), history, historyWindow);
@@ -312,18 +327,19 @@ public class ChatService {
             long retrievalDurationMs = retrievalResult.retrievalDurationMs();
             String rewrittenQuery = retrievalResult.rewrittenQuery();
 
+            // F21：拉取 agent trace，用于 SSE agent_step 事件
+            final List<AgentTrace> agentTraces = "agentic".equals(ragMode)
+                    ? agentTraceCollector.getTraces(chatId)
+                    : List.of();
+
             if (docs.isEmpty()) {
-                return handleEmptyKnowledgeBase(conversationId, request, userId, retrievalDurationMs, rewrittenQuery);
+                return handleEmptyKnowledgeBase(chatId, conversationId, request, userId,
+                        retrievalDurationMs, rewrittenQuery, retrievalResult);
             }
 
             // 构建 prompt
             String context = buildContext(docs);
             String prompt = ragService.buildPromptWithHistory(context, history, request.getMessage(), historyWindow);
-
-            // 获取 turnIndex
-            int turnIndex = chatHistoryRepository.getNextTurnIndex(conversationId);
-            final String chatId = UUID.randomUUID().toString();
-            final int finalTurnIndex = turnIndex;
 
             // 流式 LLM 调用
             Flux<String> llmStream = Flux.defer(() ->
@@ -337,11 +353,18 @@ public class ChatService {
             final long finalRetrievalDurationMs = retrievalDurationMs;
             final List<RagService.RetrievalResult> finalDocs = docs;
             final String finalRewrittenQuery = rewrittenQuery;
+            final String finalAgentMode = retrievalResult.agentMode();
+            final int finalAgentRounds = retrievalResult.agentRounds();
+            final boolean finalDegraded = retrievalResult.degraded();
+            final List<AgentTrace> finalAgentTraces = agentTraces;
             StringBuilder accumulator = new StringBuilder();
 
             return Flux.concat(
                     // 1. session-start 事件
                     Flux.just(sseEvent("session-start", conversationId + "|" + chatId)),
+
+                    // 1.5 F21：agent_step 事件流（先 chunk 之前，前端可先展示"思考过程"）
+                    buildAgentStepEvents(chatId, finalAgentTraces),
 
                     // 2. LLM 流
                     Flux.defer(() ->
@@ -355,7 +378,8 @@ public class ChatService {
                                     String fullAnswer = accumulator.toString();
                                     List<SourceRef> sources = buildSourceRefs(finalDocs);
                                     String ragMetadataJson = buildRagMetadataJson(
-                                            finalDocs, finalRetrievalDurationMs, finalRewrittenQuery);
+                                            finalDocs, finalRetrievalDurationMs, finalRewrittenQuery,
+                                            finalAgentMode, finalAgentRounds, finalDegraded);
 
                                     ChatHistory chatRecord = new ChatHistory();
                                     chatRecord.setConversationId(conversationId);
@@ -379,8 +403,9 @@ public class ChatService {
                                     }
 
                                     chatHistoryRepository.saveAndFlush(chatRecord);
-                                    log.info("流式问答落库: chatId={}, conversationId={}, turnIndex={}",
-                                            chatId, conversationId, finalTurnIndex);
+                                    log.info("流式问答落库: chatId={}, conversationId={}, turnIndex={}, agentMode={}, rounds={}, degraded={}",
+                                            chatId, conversationId, finalTurnIndex,
+                                            finalAgentMode, finalAgentRounds, finalDegraded);
 
                                     // 第一轮生成标题
                                     if (finalTurnIndex == 0) {
@@ -422,12 +447,14 @@ public class ChatService {
             result = new RagService.ChatResult("抱歉，AI服务暂时不可用，请稍后重试。", List.of(), 0L, request.getMessage());
         }
 
+        String chatId = UUID.randomUUID().toString();
         int turnIndex = chatHistoryRepository.getNextTurnIndex(conversationId);
         List<SourceRef> sources = buildSourceRefs(result.retrievedDocs());
         String ragMetadataJson = buildRagMetadataJson(
-                result.retrievedDocs(), result.retrievalDurationMs(), result.rewrittenQuery());
+                result.retrievedDocs(), result.retrievalDurationMs(), result.rewrittenQuery(),
+                result.agentMode(), result.agentRounds(), result.degraded());
 
-        saveTurn(conversationId, request.getKnowledgeBaseId(), userId,
+        saveTurn(chatId, conversationId, request.getKnowledgeBaseId(), userId,
                 request.getMessage(), result.answer(), ragMetadataJson, sources, turnIndex);
 
         final String finalAnswer = result.answer();
@@ -437,7 +464,6 @@ public class ChatService {
             ).subscribeOn(Schedulers.boundedElastic()).subscribe();
         }
 
-        String chatId = UUID.randomUUID().toString();
         return Flux.just(
                 sseEvent("session-start", conversationId + "|" + chatId),
                 sseEvent("chunk", result.answer()),
@@ -446,16 +472,18 @@ public class ChatService {
         );
     }
 
-    private Flux<ServerSentEvent<String>> handleEmptyKnowledgeBase(String conversationId,
+    private Flux<ServerSentEvent<String>> handleEmptyKnowledgeBase(String chatId, String conversationId,
                                                                     ChatRequest request, String userId,
                                                                     long retrievalDurationMs,
-                                                                    String rewrittenQuery) {
+                                                                    String rewrittenQuery,
+                                                                    RagService.ChatResult retrievalResult) {
         String emptyMsg = "该知识库暂无文档，请先上传文档。";
         int turnIndex = chatHistoryRepository.getNextTurnIndex(conversationId);
 
-        saveTurn(conversationId, request.getKnowledgeBaseId(), userId,
+        saveTurn(chatId, conversationId, request.getKnowledgeBaseId(), userId,
                 request.getMessage(), emptyMsg,
-                buildRagMetadataJson(List.of(), retrievalDurationMs, rewrittenQuery),
+                buildRagMetadataJson(List.of(), retrievalDurationMs, rewrittenQuery,
+                        retrievalResult.agentMode(), retrievalResult.agentRounds(), retrievalResult.degraded()),
                 List.of(), turnIndex);
 
         if (turnIndex == 0) {
@@ -464,12 +492,39 @@ public class ChatService {
             ).subscribeOn(Schedulers.boundedElastic()).subscribe();
         }
 
-        String chatId = UUID.randomUUID().toString();
         return Flux.just(
                 sseEvent("session-start", conversationId + "|" + chatId),
                 sseEvent("chunk", emptyMsg),
                 sseEvent("end", "")
         );
+    }
+
+    /**
+     * F21：把 agent_trace 行转成 SSE {@code agent_step} 事件流。
+     * 没 trace 或非 agentic 模式时返回空 Flux（concat 会跳过）。
+     *
+     * <p>每行 trace 一条 SSE：{@code event: agent_step\r\ndata: {json}}，
+     * 前端订阅 event.name === 'agent_step' 即可拿到"思考过程"动画数据。
+     */
+    private Flux<ServerSentEvent<String>> buildAgentStepEvents(String chatId, List<AgentTrace> traces) {
+        if (traces == null || traces.isEmpty()) {
+            return Flux.empty();
+        }
+        Flux<ServerSentEvent<String>> head = Flux.just();  // 占位避免空
+        for (AgentTrace t : traces) {
+            String json = agentTraceCollector.sseData(
+                    chatId,
+                    t.getRound(),
+                    t.getToolName(),
+                    t.getStatus(),
+                    Map.of(
+                            "durationMs", String.valueOf(t.getDurationMs() == null ? 0 : t.getDurationMs()),
+                            "summary", t.getResultSummary() == null ? "" : t.getResultSummary()
+                    )
+            );
+            head = head.concatWith(Flux.just(sseEvent("agent_step", json)));
+        }
+        return head;
     }
 
     // ==================== 工具方法 ====================
@@ -501,12 +556,23 @@ public class ChatService {
      *   <li>首轮/无改写时为空字符串</li>
      * </ul>
      *
+     * <p>【2026-07-07 增量 F21】增加 agent 三元组：
+     * <ul>
+     *   <li>{@code agent_mode} —— 实际执行模式（linear / agentic）</li>
+     *   <li>{@code agent_rounds} —— tool 调用轮次（linear 时 0）</li>
+     *   <li>{@code degraded} —— agent 触发但降级 linear</li>
+     * </ul>
+     *
      * @param retrievedDocs      检索结果（可能为空）
      * @param retrievalDurationMs 检索耗时
      * @param rewrittenQuery      LLM/Simple 改写后的检索 query（可空）
+     * @param agentMode          实际模式（linear / agentic）
+     * @param agentRounds        agent loop 工具调用轮次
+     * @param degraded           是否降级
      */
     private String buildRagMetadataJson(List<RagService.RetrievalResult> retrievedDocs,
-                                        long retrievalDurationMs, String rewrittenQuery) {
+                                        long retrievalDurationMs, String rewrittenQuery,
+                                        String agentMode, int agentRounds, boolean degraded) {
         if (retrievedDocs == null) retrievedDocs = List.of();
         try {
             List<String> docIds = retrievedDocs.stream()
@@ -522,6 +588,10 @@ public class ChatService {
             // 改写后的检索 query：与 user 原始提问分开存，便于评估改写对检索的提升
             // 改写失败降级 simple / 首轮无历史时，等于 user 原始 query
             meta.put("rewritten_query", rewrittenQuery == null ? "" : rewrittenQuery);
+            // F21：agent 模式三字段，linear 时 agent_rounds=0 / degraded=false
+            meta.put("agent_mode", agentMode == null ? "linear" : agentMode);
+            meta.put("agent_rounds", agentRounds);
+            meta.put("degraded", degraded);
 
             return objectMapper.writeValueAsString(meta);
         } catch (JsonProcessingException e) {

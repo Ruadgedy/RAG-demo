@@ -134,9 +134,22 @@ public class RagService {
      * @param retrievedDocs       实际参与本次生成的检索结果列表（已按知识库过滤）
      * @param retrievalDurationMs 检索阶段耗时（毫秒）
      * @param rewrittenQuery      改写后的检索 query（用于评估检索质量、A/B 对比）
+     * @param agentMode           实际模式（{@code "linear"} / {@code "agentic"}）
+     * @param agentRounds         agent loop 内 tool 调用轮次（linear 时为 0）
+     * @param degraded            agentic 失败/超时降级 linear 触发
      */
     public record ChatResult(String answer, List<RetrievalResult> retrievedDocs,
-                             long retrievalDurationMs, String rewrittenQuery) {}
+                             long retrievalDurationMs, String rewrittenQuery,
+                             String agentMode, int agentRounds, boolean degraded) {
+
+        /**
+         * 4-arg 向后兼容构造。linear 路径继续走这个，agent 字段填默认。
+         */
+        public ChatResult(String answer, List<RetrievalResult> retrievedDocs,
+                          long retrievalDurationMs, String rewrittenQuery) {
+            this(answer, retrievedDocs, retrievalDurationMs, rewrittenQuery, "linear", 0, false);
+        }
+    }
 
     /**
      * 处理用户问答（非流式），返回含 RAG 元数据的结果。

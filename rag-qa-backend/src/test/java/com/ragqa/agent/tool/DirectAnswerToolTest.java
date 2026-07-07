@@ -5,13 +5,16 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@link DirectAnswerTool} 单元测试（F18）。
+ * {@link DirectAnswerTool} 单元测试（F18 + F21）。
+ *
+ * <p>测试不走 agentic 上下文（{@code TraceContext.getChatId() == null}），
+ * collector 传 {@code null}，guard 分支跳过 DB 写。
  */
 class DirectAnswerToolTest {
 
     @Test
     void shouldReturnDirectAnswerToolResult() {
-        DirectAnswerTool tool = new DirectAnswerTool();
+        DirectAnswerTool tool = new DirectAnswerTool(null);
 
         ToolResult result = tool.directAnswer("你好");
 
@@ -22,7 +25,7 @@ class DirectAnswerToolTest {
 
     @Test
     void durationShouldBeReasonable() {
-        DirectAnswerTool tool = new DirectAnswerTool();
+        DirectAnswerTool tool = new DirectAnswerTool(null);
 
         ToolResult result = tool.directAnswer("你是谁");
 

@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- F21 (2026-07-07): agent_trace 表 + trace 落库 + SSE agent_step
+  - Flyway V8：`agent_trace` 表（chat_id / round / tool_name / tool_args / result_summary / duration_ms / status）+ 索引 `(chat_id, round)`
+  - `AgentTraceCollector`：每轮 tool 调用 start/done 两条落库，异常吞掉不拖垮主链路，summary 截断 500 字
+  - `TraceContext` ThreadLocal 持有 chatId + 自增 round，参考 `KnowledgeBaseContext` 模式
+  - 三个 Tool（kb_search / web_search / direct_answer）注入 collector，调用前后各记一条
+  - `RagService.ChatResult` 扩展 `agentMode` / `agentRounds` / `degraded`（4 参构造委托，linear 路径零变化）
+  - `AgenticRagService` 注入 collector，签名加 `chatId`；超时/异常降级用 `markDegraded()` 标 `degraded=true`
+  - `ChatService` 一次性生成 `chatId`（agent trace + DB 对齐，可 join），流式路径查 trace → 拼 SSE `event: agent_step` 事件，在 chunk 流之前发
+  - `chat_history.rag_metadata` 增 `agent_mode` / `agent_rounds` / `degraded` 三字段
+  - linear 路径行为零回归（默认 `rag.mode=linear`）；新增 6 单测，全量 106/106 通过
 - Increment Wave 1 (2026-07-03): Agentic RAG 升级（P1+P2）
   - 新增 FR-012 Agentic 问答模式 / FR-013 工具抽象与多源检索 / FR-014 Agent 可观测与 trace 落库
   - 新增 F17-F22：Tool 抽象+KB工具 / Web工具(Tavily)+直答 / AgenticRagService+降级 / rag.mode 路由 / agent_trace+SSE / Eval A/B+ST

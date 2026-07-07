@@ -29,7 +29,8 @@ import static org.mockito.Mockito.doThrow;
 class WebSearchToolTest {
 
     private static WebSearchTool realTool(String apiKey) {
-        return new WebSearchTool(apiKey, 5, 8000, RestClient.builder());
+        // F21：测试不走 agentic 上下文，传 null collector 走 guard 分支
+        return new WebSearchTool(apiKey, 5, 8000, RestClient.builder(), null);
     }
 
     // ---- isAvailable ----
@@ -59,7 +60,7 @@ class WebSearchToolTest {
 
     @Test
     void shouldReturnToolResultFromTavilyResponse() {
-        WebSearchTool tool = new WebSearchTool("key", 5, 8000, null);
+        WebSearchTool tool = new WebSearchTool("key", 5, 8000, null, null);
         WebSearchTool spy = org.mockito.Mockito.spy(tool);
         String tavilyResponse = "{\"results\":["
                 + "{\"title\":\"T1\",\"url\":\"http://u1.com\",\"content\":\"内容1\",\"score\":0.9},"
@@ -78,7 +79,7 @@ class WebSearchToolTest {
 
     @Test
     void shouldHandleSearchFailureGracefully() {
-        WebSearchTool tool = new WebSearchTool("key", 5, 8000, null);
+        WebSearchTool tool = new WebSearchTool("key", 5, 8000, null, null);
         WebSearchTool spy = org.mockito.Mockito.spy(tool);
         doThrow(new RuntimeException("network error")).when(spy).doSearch("query");
 
@@ -93,7 +94,7 @@ class WebSearchToolTest {
 
     @Test
     void shouldReturnEmptyContentWhenResultsHaveNoContent() {
-        WebSearchTool tool = new WebSearchTool("key", 5, 8000, null);
+        WebSearchTool tool = new WebSearchTool("key", 5, 8000, null, null);
         WebSearchTool spy = org.mockito.Mockito.spy(tool);
         doReturn("{\"results\":[{\"url\":\"http://u.com\",\"content\":\"\"}]}").when(spy).doSearch("q");
 

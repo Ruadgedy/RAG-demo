@@ -4,6 +4,7 @@ import com.ragqa.dto.ChatRequest;
 import com.ragqa.dto.ChatResponse;
 import com.ragqa.model.Conversation;
 import com.ragqa.agent.AgenticRagService;
+import com.ragqa.agent.trace.AgentTraceCollector;
 import com.ragqa.repository.ChatHistoryRepository;
 import com.ragqa.repository.ConversationRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -51,11 +52,17 @@ class ChatServiceTest {
     @Mock
     private AgenticRagService agenticRagService;
 
+    /**
+     * 【2026-07-07 F21】Agent trace 落库服务（线性 chat 路径不触发，留 mock 防 NPE）
+     */
+    @Mock
+    private AgentTraceCollector agentTraceCollector;
+
     private ChatService chatService;
 
     @BeforeEach
     void setUp() {
-        chatService = new ChatService(ragService, chatClientBuilder, chatHistoryRepository, conversationRepository, agenticRagService);
+        chatService = new ChatService(ragService, chatClientBuilder, chatHistoryRepository, conversationRepository, agentTraceCollector, agenticRagService);
 
         // 设置认证上下文（ChatService.getCurrentUserId 需要）
         org.springframework.security.core.context.SecurityContextHolder.getContext().setAuthentication(

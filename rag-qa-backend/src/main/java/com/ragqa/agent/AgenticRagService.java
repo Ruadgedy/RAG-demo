@@ -4,6 +4,8 @@ import com.ragqa.agent.tool.DirectAnswerTool;
 import com.ragqa.agent.tool.KnowledgeBaseContext;
 import com.ragqa.agent.tool.KnowledgeBaseSearchTool;
 import com.ragqa.agent.tool.WebSearchTool;
+import com.ragqa.agent.trace.AgentTraceCollector;
+import com.ragqa.agent.trace.TraceContext;
 import com.ragqa.dto.ChatMessage;
 import com.ragqa.service.RagService;
 import jakarta.annotation.PreDestroy;
@@ -44,6 +46,7 @@ public class AgenticRagService {
     private final KnowledgeBaseSearchTool kbTool;
     private final WebSearchTool webTool;
     private final DirectAnswerTool directTool;
+    private final AgentTraceCollector traceCollector;
 
     @Value("${rag.agent.timeout-ms:30000}")
     private long timeoutMs;
@@ -65,30 +68,44 @@ public class AgenticRagService {
             RagService ragService,
             KnowledgeBaseSearchTool kbTool,
             WebSearchTool webTool,
-            DirectAnswerTool directTool) {
+            DirectAnswerTool directTool,
+            AgentTraceCollector traceCollector) {
         this.chatClientBuilder = chatClientBuilder;
         this.ragService = ragService;
         this.kbTool = kbTool;
         this.webTool = webTool;
         this.directTool = directTool;
+        this.traceCollector = traceCollector;
     }
 
     /**
      * Agentic RAG 问答（非流式）。
      * LLM 自主调用 tool（KB/Web/直答），累积 tool 结果后生成最终回答。
+     *
+     * @param chatId   chat_history.id，用于把 tool 调用 trace 关联回单次问答（前端 SSE / 回溯用）
      */
-    public RagService.ChatResult chat(String message, UUID knowledgeBaseId,
+    public RagService.ChatResult chat(String chatId, String message, UUID knowledgeBaseId,
                                        List<ChatMessage> history, int historyWindow) {
         KnowledgeBaseContext.set(knowledgeBaseId);
+        TraceContext.set(chatId);
         degraded.set(false);
         CompletableFuture<RagService.ChatResult> future = null;
         try {
             future = CompletableFuture.supplyAsync(
                     () -> {
+                        // executor 拿到新线程，重新设置 TraceContext（ThreadLocal 不跨线程）
+                        TraceContext.set(chatId);
                         long start = System.currentTimeMillis();
-                        String response = doAgenticChat(message, history, historyWindow);
+                        String response;
+                        try {
+                            response = doAgenticChat(message, history, historyWindow);
+                        } finally {
+                            TraceContext.clear();
+                        }
                         long duration = System.currentTimeMillis() - start;
-                        return new RagService.ChatResult(response, List.of(), duration, message);
+                        int rounds = traceCollector.getTraces(chatId).size();
+                        return new RagService.ChatResult(response, List.of(), duration, message,
+                                "agentic", rounds, false);
                     },
                     executor);
             return future.get(timeoutMs, TimeUnit.MILLISECONDS);
@@ -96,13 +113,16 @@ public class AgenticRagService {
             if (future != null) future.cancel(true);
             log.warn("[agentic] 总超时 ({}ms)，降级 linear RAG", timeoutMs);
             degraded.set(true);
-            return ragService.chat(message, knowledgeBaseId, history, historyWindow);
+            RagService.ChatResult fallback = ragService.chat(message, knowledgeBaseId, history, historyWindow);
+            return markDegraded(fallback);
         } catch (Exception e) {
             log.warn("[agentic] agent loop 异常 ({})，降级 linear RAG", e.getMessage());
             degraded.set(true);
-            return ragService.chat(message, knowledgeBaseId, history, historyWindow);
+            RagService.ChatResult fallback = ragService.chat(message, knowledgeBaseId, history, historyWindow);
+            return markDegraded(fallback);
         } finally {
             KnowledgeBaseContext.clear();
+            TraceContext.clear();
             degraded.remove();
         }
     }
@@ -113,25 +133,40 @@ public class AgenticRagService {
      * agent loop 检索 → 累积 tool 结果 → 构建含 context 的 prompt → 返回，
      * SSE 流式生成由调用方在 RagService 层做。
      */
-    public RagService.ChatResult retrieveForStreaming(String message, UUID knowledgeBaseId,
+    public RagService.ChatResult retrieveForStreaming(String chatId, String message, UUID knowledgeBaseId,
                                                       List<ChatMessage> history, int historyWindow) {
         KnowledgeBaseContext.set(knowledgeBaseId);
+        TraceContext.set(chatId);
         degraded.set(false);
         try {
             String toolContext = doAgenticChat(message, history, historyWindow);
             String context = toolContext.isBlank()
                     ? "（无检索结果，请基于通用知识诚实回答）"
                     : "=== Agent 检索结果 ===\n" + toolContext;
-            log.info("[agentic:stream] tool 检索完成，context 字数={}", context.length());
-            return new RagService.ChatResult(null, List.of(), 0L, context);
+            int rounds = traceCollector.getTraces(chatId).size();
+            log.info("[agentic:stream] tool 检索完成，context 字数={}, rounds={}", context.length(), rounds);
+            return new RagService.ChatResult(null, List.of(), 0L, context,
+                    "agentic", rounds, false);
         } catch (Exception e) {
             log.warn("[agentic:stream] agentic 检索异常，降级: {}", e.getMessage());
             degraded.set(true);
-            return ragService.retrieveForStreaming(message, knowledgeBaseId, history, historyWindow);
+            RagService.ChatResult fallback = ragService.retrieveForStreaming(message, knowledgeBaseId, history, historyWindow);
+            return markDegraded(fallback);
         } finally {
             KnowledgeBaseContext.clear();
+            TraceContext.clear();
             degraded.remove();
         }
+    }
+
+    /**
+     * 标记 ChatResult 为降级（F21 agent 失败 → linear 兜底）。
+     * agentMode 保留 "agentic"，degraded=true 让前端 / 评估知道实际跑的是 linear。
+     */
+    private RagService.ChatResult markDegraded(RagService.ChatResult fallback) {
+        return new RagService.ChatResult(fallback.answer(), fallback.retrievedDocs(),
+                fallback.retrievalDurationMs(), fallback.rewrittenQuery(),
+                "agentic", 0, true);
     }
 
     /**
