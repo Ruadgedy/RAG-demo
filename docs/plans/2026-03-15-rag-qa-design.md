@@ -1283,6 +1283,23 @@ Spring AI 1.1.x `ChatClient.call()` 自动处理 tool-execution loop（LLM 请�
 | Web 搜索无 API key / 失败 | 仅 KB/直答 tool 可用，照常 agent loop |
 | `rag.mode=linear` | 直接走 `RagService`，不进 agent |
 
+#### 11.3.8 per-conversation 路由（F20，用户可选模式）
+
+用户可在对话级切换 linear/agentic，全局 `rag.mode` 降级为默认值：
+
+- **数据模型**：`Conversation` 表加 `rag_mode` 字段（VARCHAR, nullable，Flyway 迁移）。null = 继承全局默认。
+- **路由优先级**：`conversation.rag_mode`（非 null）> 全局 `rag.mode`（默认 linear）
+- **API**：chat 请求可带 `mode` 参数（可选）；切换 mode 的独立端点 `PATCH /api/conversations/{id}/rag-mode` 持久化到 `Conversation.rag_mode`
+- **新对话**：创建时 `rag_mode=null`，前端 toggle 显示全局默认态；用户切换后写入
+
+```
+chat 请求 → conversation.rag_mode
+  ├── != null → 用 conversation 级 mode
+  └── == null → 用全局 rag.mode 默认值
+       ├── linear  → RagService
+       └── agentic → AgenticRagService
+```
+
 ### 11.4 数据模型扩展（F21）
 
 新增 `agent_trace` 表（Flyway 迁移 `V__add_agent_trace.sql`），避免 `chat_history.rag_metadata` JSON 膨胀：
@@ -1307,7 +1324,7 @@ CREATE TABLE agent_trace (
 
 ```properties
 # === Agentic RAG ===
-rag.mode=${RAG_MODE:linear}              # linear|agentic，默认 linear 灰度
+rag.mode=${RAG_MODE:linear}              # linear|agentic，全局默认值；Conversation.rag_mode 可 per-conversation 覆盖（见 §11.3.8）
 rag.agent.model=${RAG_AGENT_MODEL:MiniMax-M3}
 rag.agent.timeout-ms=${RAG_AGENT_TIMEOUT_MS:30000}
 rag.agent.temperature=0.0

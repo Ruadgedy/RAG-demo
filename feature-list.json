@@ -353,15 +353,18 @@
     {
       "id": 20,
       "category": "feature",
-      "title": "rag.mode 路由 + ChatService 集成",
-      "description": "application.properties 加 rag.mode（默认 linear）；ChatService 按开关路由到 RagService（linear）或 AgenticRagService（agentic）；linear 行为完全不变",
+      "title": "rag.mode 路由 + ChatService 集成 + per-conversation mode",
+      "description": "application.properties 加 rag.mode（默认 linear，全局默认值）；Conversation 表加 rag_mode 字段（Flyway，per-conversation 覆盖）；chat API 接受 mode 参数；ChatService 路由优先级：conversation.rag_mode > 全局 rag.mode；linear 行为完全不变",
       "priority": "high",
       "status": "failing",
       "wave": 1,
       "srs_trace": ["FR-012"],
       "verification_steps": [
         "Given rag.mode=linear, when 提问, then 走 RagService 流水线行为不变",
-        "Given rag.mode=agentic, when 提问, then 走 AgenticRagService"
+        "Given rag.mode=agentic, when 提问, then 走 AgenticRagService",
+        "Given conversation.rag_mode=agentic 且全局 rag.mode=linear, when 提问, then 走 AgenticRagService（conversation 级覆盖全局）",
+        "Given conversation.rag_mode=null, when 提问, then 用全局 rag.mode 默认值",
+        "Given 用户切换 mode, when 调 PATCH /api/conversations/{id}/rag-mode, then Conversation.rag_mode 持久化"
       ],
       "dependencies": [19],
       "ui": false
@@ -398,6 +401,24 @@
       ],
       "dependencies": [21],
       "ui": false
+    },
+    {
+      "id": 23,
+      "category": "feature",
+      "title": "前端对话模式切换 UI（per-conversation）",
+      "description": "对话界面加 mode toggle（传统模式/智能体模式）；切换时调 PATCH /api/conversations/{id}/rag-mode 持久化到 Conversation.rag_mode；当前对话立即按新 mode 路由；显示当前 mode 状态",
+      "priority": "medium",
+      "status": "failing",
+      "wave": 1,
+      "srs_trace": ["FR-012"],
+      "verification_steps": [
+        "[devtools] Given 对话界面, when 用户点击 mode toggle, then 切换传统/智能体模式并持久化到 Conversation.rag_mode",
+        "[devtools] Given 切换到智能体模式, when 后续提问, then 走 AgenticRagService",
+        "[devtools] Given 新对话, when 创建, then mode 默认继承全局 rag.mode（toggle 显示默认态）"
+      ],
+      "dependencies": [20],
+      "ui": true,
+      "ui_entry": "/"
     }
   ],
   "waves": [
