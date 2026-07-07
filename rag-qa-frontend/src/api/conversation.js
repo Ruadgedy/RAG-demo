@@ -62,6 +62,17 @@ export function updateTitle(id, title) {
   return http.patch(`${BASE}/${id}/title`, { title }).then(r => r.data)
 }
 
+/**
+ * 【2026-07-07 F23】更新对话组的 RAG 模式（per-conversation 覆盖全局默认）
+ *
+ * @param {string} id        对话组 ID
+ * @param {string|null} ragMode  'linear' | 'agentic' | null（null = 恢复全局默认值）
+ * @returns {Promise<ConversationDto>} 更新后的对话组
+ */
+export function updateRagMode(id, ragMode) {
+  return http.patch(`${BASE}/${id}/rag-mode`, { ragMode }).then(r => r.data)
+}
+
 // ==================== 兼容旧接口 ====================
 
 /**

@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 16/22 · Last: F21 agent_trace 落库 + SSE agent_step · Next: F22 Eval A/B + ST 测试用例
+Progress: 16/22 · Last: F23 前端 mode toggle UI · Next: F22 Eval A/B + ST 测试用例（F21/F23 ST 用例已出）
 
 ---
 
@@ -116,3 +116,25 @@ Progress: 16/22 · Last: F21 agent_trace 落库 + SSE agent_step · Next: F22 Ev
 
 **Documents updated**: docs/PR/PR-2026-07-07-f21-agent-trace.md
 **Next**: F22 Eval A/B + ST 测试用例 / docs/test-cases/feature-21.md
+
+### Session 7 — F23 前端对话模式切换 UI (2026-07-07)
+
+**Phase**: Worker (UI 落地 + 后端最小支撑)
+**Scope**: Wave 1 内 F23 闭环
+
+**完成内容**：
+- ✅ 后端：`GET /api/config`（读 `rag.mode` / `rag.history.turns`）+ `ConfigDto` + `ConfigControllerTest`（2 例）
+- ✅ 前端：`api/config.js` + `stores/config.js`（全局默认 Pinia store）
+- ✅ 前端：`api/conversation.js` 加 `updateRagMode(id, mode)`（PATCH 端点 F20 已就绪）
+- ✅ 前端 `stores/chat.js`：保留 `ragMode` 映射 / `currentConversation` / `effectiveRagMode` / `updateRagMode` action（乐观 + 回滚 + Toast）
+- ✅ 前端 `RagModeToggle.vue`：两-pill 切换组件（lucide ListOrdered + Sparkles，agentic 选中态品牌渐变）
+- ✅ 前端 `views/ChatView.vue`：onMounted 并行拉 config；顶部挂 toggle，stream / !convId 时 disabled
+- ✅ ST 用例：docs/test-cases/feature-23-frontend-mode-toggle.md（6 例 devtools）
+- ✅ npm run build 通过；mvn test 108/108 通过
+
+**关键决策**：effectiveRagMode = conv.rag_mode ?? globalRagMode（前后端统一公式）；乐观更新失败回滚 + Toast；流式锁定避免半路切换错配；configStore `loaded` flag 单次加载 + fallback linear 兜底
+
+**linear 路径零回归**：默认 `rag.mode=linear`，新对话 fallback 到 linear
+
+**Documents updated**: docs/PR/PR-2026-07-07-f23-frontend-mode-toggle.md、docs/test-cases/feature-23-frontend-mode-toggle.md
+**Next**: F22 Eval A/B linear vs agentic + docs/test-cases/feature-17~21.md 一组 ST 用例

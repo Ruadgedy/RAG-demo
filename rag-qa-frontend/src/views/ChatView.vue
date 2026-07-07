@@ -11,6 +11,11 @@
 
     <!-- 主区 -->
     <div class="chat-main">
+      <!-- F23：顶部模式切换条（当前对话有效 RAG 模式 / 流式中禁用） -->
+      <div v-if="kbStore.currentKb" class="chat-header">
+        <RagModeToggle :disabled="chat.isStreaming || !chat.currentConversationId" />
+      </div>
+
       <MessageList ref="msgListRef" :stream-tick="streamTick">
         <template v-if="!kbStore.currentKb">
           <WelcomeEmptyState />
@@ -49,13 +54,16 @@ import WelcomeEmptyState from '@/components/chat/WelcomeEmptyState.vue'
 import MessageList from '@/components/chat/MessageList.vue'
 import MessageBubble from '@/components/chat/MessageBubble.vue'
 import ComposerInput from '@/components/chat/ComposerInput.vue'
+import RagModeToggle from '@/components/chat/RagModeToggle.vue'
 
 import { useKnowledgeBaseStore } from '@/stores/knowledgeBase'
 import { useChatStore } from '@/stores/chat'
+import { useConfigStore } from '@/stores/config'
 import { useDocumentStream } from '@/composables/useDocumentStream'
 
 const kbStore = useKnowledgeBaseStore()
 const chat = useChatStore()
+const configStore = useConfigStore()
 
 const composerRef = ref(null)
 const msgListRef = ref(null)
@@ -70,8 +78,12 @@ const docStream = useDocumentStream(kbStore.currentKb, kbStore.documents)
 // ===== 生命周期 =====
 onMounted(async () => {
   try {
-    await kbStore.fetchAll()
-    await chat.fetchConversations()
+    // 【F23】全局默认值（rag.mode 等）—— 与 conversations 并行拉，不互相依赖
+    await Promise.all([
+      kbStore.fetchAll(),
+      chat.fetchConversations(),
+      configStore.fetchConfig(),
+    ])
     if (kbStore.currentKb) {
       await kbStore.fetchDocuments(kbStore.currentKb.id)
     }
@@ -114,5 +126,13 @@ function onPickSuggestion(prompt) {
   display: flex;
   flex-direction: column;
   position: relative;
+}
+
+/* F23：顶部模式切换条 —— 与消息列表衔接，左对齐 */
+.chat-header {
+  display: flex;
+  align-items: center;
+  padding: 10px 20px 6px;
+  flex-shrink: 0;
 }
 </style>

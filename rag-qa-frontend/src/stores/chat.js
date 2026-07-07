@@ -18,6 +18,7 @@ import { ref, computed } from 'vue'
 import * as chatApi from '@/api/chat'
 import * as conversationApi from '@/api/conversation'
 import { useKnowledgeBaseStore } from './knowledgeBase'
+import { useConfigStore } from './config'
 import { useToast } from '@/composables/useToast'
 
 const STREAM_DEFAULT = import.meta.env.VITE_CHAT_STREAM !== 'false'
@@ -36,6 +37,28 @@ export const useChatStore = defineStore('chat', () => {
   const hasMessages = computed(() => messages.value.length > 0)
   const streamingEnabled = computed(() => streamMode.value === 'streaming')
 
+  /**
+   * 【2026-07-07 F23】当前对话组完整对象（从列表里查）。
+   */
+  const currentConversation = computed(() =>
+    conversations.value.find(c => c.id === currentConversationId.value) || null
+  )
+
+  /**
+   * 【2026-07-07 F23】当前对话实际生效的 RAG 模式：
+   * 优先级：当前对话 conv.rag_mode ?? 全局默认值（来自 config store）。
+   */
+  const effectiveRagMode = computed(() => {
+    const convMode = currentConversation.value?.ragMode
+    if (convMode === 'linear' || convMode === 'agentic') return convMode
+    // convMode 为 null/undefined/无效值 → 走全局默认
+    try {
+      return useConfigStore().ragMode || 'linear'
+    } catch {
+      return 'linear'  // config store 未挂载时的兜底
+    }
+  })
+
   // ==================== 对话组操作 ====================
 
   /**
@@ -49,6 +72,8 @@ export const useChatStore = defineStore('chat', () => {
       firstQuery: c.firstQuery,
       historyWindow: c.historyWindow || 3,
       turnCount: c.turnCount || 0,
+      // 【2026-07-07 F23】保留 rag_mode 字段供 mode toggle + effectiveRagMode computed
+      ragMode: c.ragMode ?? null,
       updatedAt: c.updatedAt,
     }))
     return conversations.value
@@ -155,8 +180,38 @@ export const useChatStore = defineStore('chat', () => {
         localConv.firstQuery = conv.firstQuery
         localConv.turnCount = conv.turnCount
       }
+      // 【2026-07-07 F23】同步最新 ragMode，覆盖前端乐观值可能漏的状态
+      if (localConv) {
+        localConv.ragMode = conv.ragMode ?? null
+      }
     } catch (e) {
       // 静默失败，不影响主流程
+    }
+  }
+
+  /**
+   * 【2026-07-07 F23】切换当前对话组的 RAG 模式（per-conversation 覆盖全局）
+   *
+   * @param {string} convId   对话组 ID
+   * @param {string|null} mode  'linear' | 'agentic' | null（null 恢复全局默认）
+   * @returns {Promise<boolean>} 是否成功
+   */
+  async function updateRagMode(convId, mode) {
+    const conv = conversations.value.find(c => c.id === convId)
+    const prev = conv ? conv.ragMode : null
+    // 乐观更新 UI：立即切换 toggle，然后请求 PATCH
+    if (conv) conv.ragMode = mode
+    try {
+      const updated = await conversationApi.updateRagMode(convId, mode)
+      if (conv && updated) {
+        conv.ragMode = updated.ragMode ?? null
+      }
+      return true
+    } catch (e) {
+      // 回滚乐观值
+      if (conv) conv.ragMode = prev
+      toast.error('切换 RAG 模式失败：' + e.message)
+      return false
     }
   }
 
@@ -307,9 +362,12 @@ export const useChatStore = defineStore('chat', () => {
     // 状态
     conversations, currentConversationId, messages, streamMode, isStreaming, abortController,
     hasMessages, streamingEnabled,
+    // F23：当前对话组 + 实际生效的 RAG 模式
+    currentConversation, effectiveRagMode,
     // 对话组操作
     fetchConversations, loadConversation, startNewConversation,
     deleteConversation, updateWindow, refreshCurrentConversation,
+    updateRagMode,
     // 模式切换
     setStreamMode,
     // 发送消息

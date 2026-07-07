@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- F23 (2026-07-07): 前端对话模式切换 UI（per-conversation）
+  - 后端 `GET /api/config` 暴露全局 `rag.mode` / `defaultHistoryWindow`，避免前端硬编码
+  - 前端 `RagModeToggle.vue` 两-pill 切换组件（lucide ListOrdered + Sparkles），agentic 选中态用品牌渐变
+  - 前端 `stores/chat.js`：保留 `ragMode` 映射 + `currentConversation` / `effectiveRagMode`（conv.rag_mode ?? global）/ `updateRagMode` action（乐观 + 回滚 + Toast）
+  - 前端 `stores/config.js` 新 store，单次加载 + fallback linear
+  - `ChatView` 顶部挂 toggle，流式问答中 disabled（防止半路切换错配）
+  - 交互：点击立即乐观更新 → PATCH `/api/conversations/{id}/rag-mode` → 失败回滚
+  - 视觉效果：linear = 白色卡片 / agentic = 紫渐变高亮
+  - linear 路径行为零回归（默认 rag.mode=linear，前端 fallback 一致）
 - F21 (2026-07-07): agent_trace 表 + trace 落库 + SSE agent_step
   - Flyway V8：`agent_trace` 表（chat_id / round / tool_name / tool_args / result_summary / duration_ms / status）+ 索引 `(chat_id, round)`
   - `AgentTraceCollector`：每轮 tool 调用 start/done 两条落库，异常吞掉不拖垮主链路，summary 截断 500 字
