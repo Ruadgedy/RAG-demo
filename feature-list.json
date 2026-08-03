@@ -347,7 +347,7 @@
       "title": "AgenticRagService + agent loop + 降级",
       "description": "AgenticRagService 用 ChatClient.tools() + internalToolExecutionEnabled 跑 tool-calling loop；CompletableFuture 总超时（30s）兜底；超时/异常降级到 RagService.chat（linear）",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "wave": 1,
       "srs_trace": ["FR-012"],
       "verification_steps": [
@@ -356,7 +356,11 @@
         "Given LLM 不支持 tool-calling, when 调用, then 回退 RagService.chat"
       ],
       "dependencies": [17, 18],
-      "ui": false
+      "ui": false,
+      "st_case_path": "docs/test-cases/feature-19-agentic-rag-service.md",
+      "st_case_count": 6,
+      "git_sha": "349af27",
+      "report_path": "docs/report/feature-19-agentic-rag-service-report.md"
     },
     {
       "id": 20,

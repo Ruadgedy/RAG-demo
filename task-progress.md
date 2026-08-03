@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 18/23 · Last: F18 WebSearchTool（Tavily）+ DirectAnswerTool（2026-08-03） · Next: F19 AgenticRagService + agent loop + 降级
+Progress: 19/23 · Last: F19 AgenticRagService + agent loop + 降级（2026-08-03） · Next: F20 rag.mode 路由 + ChatService 集成 + per-conversation mode
 
 ---
 
@@ -186,3 +186,14 @@ Progress: 18/23 · Last: F18 WebSearchTool（Tavily）+ DirectAnswerTool（2026-
 #### Risks
 - ⚠ [Dependency/Major] `TAVILY_API_KEY` 当前为空；真实 Tavily 401/200 场景 PENDING-MANUAL，需有 key 后在隔离环境补测。
 - ⚠ [Mutant/Minor] WebSearchTool 存在 2 个 timeout setter 等价变异 + 2 个 stream 条件变异；Mutation 84% 已达门槛。
+
+### Feature #19: AgenticRagService + agent loop + 降级 — PASS
+- Completed: 2026-08-03
+- Service dependencies: 真实 LLM tool-calling + DB + Chroma。自动化测试通过 Mockito mock 边界。
+- TDD: green ✓ (5/5 F19 tests; Wave 1 regression 16/16)
+- Feature-ST: 6 cases documented; 5 自动化 Mock cases PASS；1 真实 LLM Agent 场景 PENDING-MANUAL
+- Inline Check: PASS (P2: 3/3 public methods, T2: 5/5 inventory rows, D3: OK, U1: N/A)
+- Git: 349af27 feat: AgenticRagService + agent loop + 降级 (#19)
+#### Risks
+- ⚠ [Dependency/Major] 真实 LLM Agent 端到端 PENDING-MANUAL，需完整服务环境补测。
+- ⚠ [Performance/Accepted] 30s 超时上限对流式首字延迟有影响，已通过降级 + null 返回隔离。
