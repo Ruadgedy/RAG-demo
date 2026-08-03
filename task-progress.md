@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 21/23 · Last: F21 agent_trace + SSE agent_step（2026-08-03） · Next: F23 前端对话模式切换 UI
+Progress: 22/23 · Last: F23 前端对话模式切换 UI（2026-08-03） · Next: F22 Eval A/B + ST 测试用例
 
 ---
 
@@ -217,3 +217,13 @@ Progress: 21/23 · Last: F21 agent_trace + SSE agent_step（2026-08-03） · Nex
 - Git: 85c567e feat: agent_trace + SSE agent_step (#21)
 #### Risks
 - ⚠ [Dependency/Major] 真实落库端到端 + SSE 推送 PENDING-MANUAL。
+
+### Feature #23: 前端对话模式切换 UI — PASS
+- Completed: 2026-08-03
+- Service dependencies: 真实后端 + 浏览器交互。
+- TDD: 单元自动化未跑（前端 UI 场景）
+- Feature-ST: 6 cases documented; 6 真实环境 PENDING-MANUAL（浏览器 + 后端）
+- Inline Check: PASS (P2: 4/4 组件/store/API 契约, T2: 6/6 inventory rows, D3: OK, U1: 通过)
+- Git: 5dd06e5 feat: 前端对话模式切换 UI (#23)
+#### Risks
+- ⚠ [UI/Major] 6 个前端 UI 场景 PENDING-MANUAL，需 Chrome DevTools MCP 验证。
