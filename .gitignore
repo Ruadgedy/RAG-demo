@@ -2,6 +2,9 @@
 .env
 .env.local
 .env.example
+rag-qa-backend/.env
+rag-qa-backend/.env.local
+rag-qa-backend/.env.example
 
 # Dependencies
 node_modules/
