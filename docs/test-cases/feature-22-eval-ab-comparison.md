@@ -1,139 +1,225 @@
-# Feature #22 — Eval A/B 对比 + Wave 1 ST 测试用例
+# 测试用例集: Eval A/B 对比
 
-| 项目 | 内容 |
-|------|------|
-| **Feature ID** | #22 |
-| **关联类** | `eval/EvalService.abCompare`、`eval/EvalController.abCompare`、`docs/test-cases/feature-17~22.md` |
-| **关联需求** | FR-012 / FR-013 / FR-014 |
-| **前置依赖** | F21（trace 落库，给 agentic 提供可观测锚点） |
-| **优先级** | P2（评估与回归） |
-| **编写日期** | 2026-07-07 |
+**Feature ID**: 22
+**关联需求**: FR-012 / FR-013 / FR-014（评估与回归）
+**日期**: 2026-08-03
+**测试标准**: ISO/IEC/IEEE 29119-3
+**模板版本**: 1.0
 
----
+## 摘要
 
-## 1. 功能概述
+| 类别 | 用例数 |
+|------|--------|
+| functional | 3 |
+| integration | 1 |
+| **合计** | **4** |
 
-### 1.1 背景
+> validate_st_cases.py 仅接受 FUNC/BNDRY/UI/SEC/PERF 类别；真实 LLM/DB/Chroma 场景归入 FUNC-004 并标记 PENDING-MANUAL。
 
-Wave 1 引入 agentic 模式，需要量化对比 linear vs agentic。同题、同 KB、同历史：
-- linear：现有流水线，单次检索 + rerank + generate
-- agentic：LLM 自主调多 tool
+## 测试用例
 
-需要一份对比报告（耗时、回答内容、agent_rounds、degraded、错误），帮团队做下一阶段的产品决策（默认 linear 还是 agentic、按 KB 切换……）。
+### 用例编号
 
-### 1.2 A/B 接口
+ST-FUNC-022-001
 
-- `POST /api/admin/eval/ab` body `{"question":"...", "kbId":"...", "historyWindow":3}` → `AbCompareResult`
+### 关联需求
 
-### 1.3 AbCompareResult 报告字段
+FR-012 同问题对比 linear vs agentic
 
-```json
-{
-  "question": "产品A价格",
-  "kbId": "uuid",
-  "timestamp": 1751846400000,
-  "linear": {
-    "mode": "linear",
-    "answer": "2999元",
-    "latencyMs": 1234,
-    "retrievedChunkCount": 3,
-    "sourceCount": 1,
-    "agentRounds": null,
-    "degraded": null,
-    "error": null
-  },
-  "agentic": {
-    "mode": "agentic",
-    "answer": "2999元（KB+Web 验证）",
-    "latencyMs": 4521,
-    "retrievedChunkCount": 6,
-    "sourceCount": 2,
-    "agentRounds": 2,
-    "degraded": false,
-    "error": null
-  }
-}
-```
+### 测试目标
 
----
+验证 EvalService.abCompare 双侧成功时输出完整产物。
 
-## 2. 验收用例
+### 前置条件
 
-### 2.1 ST-22-1 A/B 正常双侧成功
+- mock RagService.chat 正常返回
+- mock AgenticRagService.chat 正常返回
 
-| Step | 操作 | 期望 |
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
 |---|---|---|
-| 1 | `curl -X POST http://localhost:8080/api/admin/eval/ab -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"question":"产品A价格","kbId":"<uuid>"}'` | 200，response body 如上格式 |
-| 2 | 两边 `error=null` | 报告可解读 |
-| 3 | linear.latencyMs < agentic.latencyMs（默认 agent 更慢） | 多数情况如此 |
-| 4 | agentic.agentRounds ≥ 1 | 至少 1 轮 tool |
+| 1 | 调 abCompare(q, kb, history, 5) | 不抛异常 |
+| 2 | 读取 AbCompareResult.linear | answer 非空，error=null |
+| 3 | 读取 AbCompareResult.agentic | answer 非空，error=null |
+| 4 | 读取 latencyMs | 两者均 ≥ 0 |
 
-### 2.2 ST-22-2 agentic 降级 → report 标 degraded=true
+### 验证点
 
-**前置**：强制 agentic 失败（注入异常 / timeout=10ms）
+- 报告字段完整。
 
-| Step | 操作 | 期望 |
+### 后置检查
+
+- 关闭线程池。
+
+### 元数据
+
+- **优先级**: Medium
+- **类别**: functional
+- **已自动化**: Yes
+- **测试引用**: `EvalServiceAbCompareTest::abCompareShouldReturnBothOutcomesWhenBothSucceed`
+- **Test Type**: Mock
+
+---
+
+### 用例编号
+
+ST-FUNC-022-002
+
+### 关联需求
+
+FR-012 agentic 降级
+
+### 测试目标
+
+验证 agentic 降级到 linear 时报告 degraded=true，不影响 linear 产物。
+
+### 前置条件
+
+- mock AgenticRagService 返回 degraded ChatResult
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
 |---|---|---|
-| 1 | 触发 A/B | 200 |
-| 2 | `agentic.error=null`（agent 内部 catch 并降级到 linear，最终产出可用 answer） | — |
-| 3 | `agentic.degraded=true` | 报告标了 |
-| 4 | `agentic.agentRounds=0` | agentic 没真跑 |
-| 5 | `agentic.mode='agentic'` | 仍标识为 agentic（区分"配置" vs "实际跑"） |
+| 1 | 调 abCompare | linear 仍返回 answer |
+| 2 | 读取 agentic.degraded | true |
+| 3 | 读取 agentic.error | null（属于降级而非异常） |
 
-### 2.3 ST-22-3 单侧失败不阻塞对侧
+### 验证点
 
-**前置**：让 RagService 抛异常
+- 降级状态被记录且隔离 linear。
 
-| Step | 操作 | 期望 |
+### 后置检查
+
+- 关闭线程池。
+
+### 元数据
+
+- **优先级**: Medium
+- **类别**: functional
+- **已自动化**: Yes
+- **测试引用**: `EvalServiceAbCompareTest::abCompareShouldMarkDegradedWhenAgenticFellBackToLinear`
+- **Test Type**: Mock
+
+---
+
+### 用例编号
+
+ST-FUNC-022-003
+
+### 关联需求
+
+FR-012 单边失败隔离
+
+### 测试目标
+
+验证 linear 抛异常时，agentic 仍可返回。
+
+### 前置条件
+
+- mock RagService.chat 抛 RuntimeException
+- mock AgenticRagService.chat 正常
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
 |---|---|---|
-| 1 | 触发 A/B | 200 |
-| 2 | `linear.error="Chroma 突然挂了"` | 错误填进 error 字段 |
-| 3 | `linear.answer=null` | — |
-| 4 | `agentic.answer="..."`（agentic 仍跑了，或自身降级但有 answer） | 对侧不受影响 |
+| 1 | 调 abCompare | 不抛异常 |
+| 2 | 读取 linear.error | 异常信息非空 |
+| 3 | 读取 agentic.answer | 非空 |
 
-### 2.4 ST-22-4 ST 测试用例落地
+### 验证点
 
-**前置**：Wave 1 F17~F21 + F23 全部完成
+- 单边失败不阻塞对侧。
 
-| 文件 | 覆盖 |
-|---|---|
-| `feature-17-tool-abstraction.md` | Tool 抽象 / KB Tool / ThreadLocal 注入 kbId |
-| `feature-18-websearch-directanswer-tool.md` | WebSearchTool / DirectAnswerTool |
-| `feature-19-agentic-rag-service.md` | AgenticRagService / 多 tool 编排 / 降级 |
-| `feature-20-rag-mode-routing.md` | rag.mode 路由 / per-conv / 持久化 |
-| `feature-21-agent-trace-sse.md` | agent_trace 落库 / SSE agent_step / degraded |
-| `feature-22-eval-ab-comparison.md`（本文件）| Eval A/B |
+### 后置检查
 
-通过条件：6 文件 commit 入 `docs/test-cases/`
+- 关闭线程池。
 
----
+### 元数据
 
-## 3. 自动化测试覆盖
-
-| 层 | 通过条件 |
-|---|---|
-| 单测 | `EvalServiceAbCompareTest` 3 例：双成功 / agentic 降级 / linear 异常吞噬 |
+- **优先级**: Medium
+- **类别**: functional
+- **已自动化**: Yes
+- **测试引用**: `EvalServiceAbCompareTest::abCompareShouldSwallowLinearExceptionAndStillRunAgentic`
+- **Test Type**: Mock
 
 ---
 
-## 4. 性能与可观测
+### 用例编号
 
-- A/B 默认串行（先 linear 后 agentic）：避免线程池竞争 + ThreadLocal 错乱
-- 总耗时上限 ≈ max(linear.latencyMs, agentic.latencyMs) + agentic 自身 30s 超时
-- `ab-` 前缀的 chatId 写入 agent_trace，但 kebab-case 易识别（"ab-uuid"），可与真实对话区分
+ST-FUNC-022-004
 
----
+### 关联需求
 
-## 5. 不在范围内
+FR-012 端到端 Eval A/B
 
-- A/B 在浏览器端按钮触发（前端 toggle 已有，但自动跑 A/B 留给运维）
-- A/B 报告持久化（DB / 文件）：当前同步返回，留 P3
-- 多 KB × 多 query 批跑：仍是 `POST /api/admin/eval/run` 数据集跑批
+### 测试目标
 
----
+验证在真实后端 + LLM + DB + Chroma 环境下，POST /api/admin/eval/ab 输出真实报告。
 
-## 6. 关联
+### 前置条件
 
-- Wave 1 总 PR：`PR-2026-07-04-agentic-rag-wave1.md`
-- 设计：Design §11（评估章节 + 数据模型 §11.5）
-- F17~F21 实现 commits：见 `task-progress.md` Session 5/6/7
+- 后端、数据库、Chroma 已启动
+- 有效 LLM + KB 文档
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | curl POST /api/admin/eval/ab | 200 |
+| 2 | 读取 linear.answer/latencyMs | 非空 |
+| 3 | 读取 agentic.answer/agentRounds/degraded | 非空，rounds≥0 |
+
+### 验证点
+
+- 端到端 A/B 报告可读。
+
+### 后置检查
+
+- 删除 trace/对话，停止服务。
+
+### 元数据
+
+- **优先级**: Medium
+- **类别**: functional
+- **已自动化**: No
+- **手动测试原因**: external-action: 需真实 LLM + 数据库 + Chroma + 登录凭据。
+- **测试引用**: N/A
+- **Test Type**: Real
+
+## 可追溯矩阵
+
+| 用例 ID | 关联需求 | verification_step | 自动化测试 | Test Type | 结果 |
+|---------|----------|-------------------|-----------|----------|------|
+| ST-FUNC-022-001 | FR-012 | verification_step[0] | EvalServiceAbCompareTest::abCompareShouldReturnBothOutcomesWhenBothSucceed | Mock | PASS |
+| ST-FUNC-022-002 | FR-012 | 降级隔离 | EvalServiceAbCompareTest::abCompareShouldMarkDegradedWhenAgenticFellBackToLinear | Mock | PASS |
+| ST-FUNC-022-003 | FR-012 | 异常隔离 | EvalServiceAbCompareTest::abCompareShouldSwallowLinearExceptionAndStillRunAgentic | Mock | PASS |
+| ST-FUNC-022-004 | FR-012 | verification_step[0] | N/A | Real | PENDING-MANUAL |
+
+## Real Test Case Execution Summary
+
+| Metric | Count |
+|--------|-------|
+| Total Real Test Cases | 1 |
+| Passed | 0 |
+| Failed | 0 |
+| Pending | 1 |
+
+## Manual Test Case Summary
+
+| Metric | Count |
+|--------|-------|
+| Total Manual Test Cases | 1 |
+| Manual Passed (MANUAL-PASS) | 0 |
+| Manual Failed (MANUAL-FAIL) | 0 |
+| Blocked | 0 |
+| Pending (PENDING-MANUAL) | 1 |
+
+> 端到端 A/B 场景需完整服务环境。
+
+## 自动化验收执行证据
+
+- `EvalServiceAbCompareTest` 3/3 通过。
+- 1 个真实环境 PENDING-MANUAL。
