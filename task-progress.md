@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 20/23 · Last: F20 rag.mode 路由 + ChatService 集成 + per-conversation mode（2026-08-03） · Next: F21 agent_trace + SSE agent_step
+Progress: 21/23 · Last: F21 agent_trace + SSE agent_step（2026-08-03） · Next: F23 前端对话模式切换 UI
 
 ---
 
@@ -207,3 +207,13 @@ Progress: 20/23 · Last: F20 rag.mode 路由 + ChatService 集成 + per-conversa
 - Git: 6e6d399 feat: rag.mode 路由 + per-conversation mode (#20)
 #### Risks
 - ⚠ [Dependency/Major] 真实后端 + 数据库 PATCH 端到端 PENDING-MANUAL。
+
+### Feature #21: agent_trace + SSE agent_step — PASS
+- Completed: 2026-08-03
+- Service dependencies: 数据库表 + SSE 客户端。
+- TDD: green ✓ (AgentTraceCollectorTest 6/6)
+- Feature-ST: 7 cases documented; 5 自动化 Mock PASS；2 真实端到端 PENDING-MANUAL
+- Inline Check: PASS
+- Git: 85c567e feat: agent_trace + SSE agent_step (#21)
+#### Risks
+- ⚠ [Dependency/Major] 真实落库端到端 + SSE 推送 PENDING-MANUAL。
