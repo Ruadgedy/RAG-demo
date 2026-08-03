@@ -306,7 +306,7 @@
       "title": "Tool 抽象 + KnowledgeBaseSearchTool",
       "description": "定义统一 ToolResult + @Tool 抽象；实现 KnowledgeBaseSearchTool 包装 RagService.retrieve（复用召回+rerank+fallback）；KnowledgeBaseContext 注入 kbId 不暴露给 LLM",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "wave": 1,
       "srs_trace": ["FR-013"],
       "verification_steps": [
@@ -314,7 +314,11 @@
         "Given KnowledgeBaseContext, when tool 执行, then kbId 从上下文注入而非 LLM 参数"
       ],
       "dependencies": [4],
-      "ui": false
+      "ui": false,
+      "st_case_path": "docs/test-cases/feature-17-tool-abstraction.md",
+      "st_case_count": 12,
+      "git_sha": "6f00cf3",
+      "report_path": "docs/report/feature-17-tool-abstraction-report.md"
     },
     {
       "id": 18,

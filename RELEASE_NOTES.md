@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- F17（2026-08-03）：Tool 抽象 + KnowledgeBaseSearchTool 验收闭环
+  - 新增 `docs/features/2026-08-03-f17-tool-abstraction.md` 详细设计文档
+  - `KnowledgeBaseSearchToolTest` 扩展至 11 例，覆盖 kbId 上下文注入、空结果、来源去重、Spring AI `@Tool` 注册、trace start/done 分支
+  - Feature-ST 文档更新为 ISO/IEC/IEEE 29119-3 格式，12 个用例；自动化用例 11/11 通过，3 个真实外部依赖场景标记 PENDING-MANUAL
+  - Quality Gates：F17 行覆盖 100%、分支覆盖 92.3%、变异分数 90%
 - F22 (2026-07-07): EvalService A/B 对比 + Wave 1 ST 测试用例
   - `EvalService.abCompare(question, kbId, history, historyWindow)` → AbCompareResult 双侧产物对比报告
   - `ModeOutcome` record（answer / latencyMs / retrievedChunkCount / sourceCount / agentRounds / degraded / error）

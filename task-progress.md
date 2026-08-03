@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 16/22 · Last: F22 Eval A/B + Wave 1 ST 测试用例 · Next: (Wave 1 收尾；后续按需触发下一次 Increment)
+Progress: 17/23 · Last: F17 Tool 抽象 + KnowledgeBaseSearchTool（2026-08-03） · Next: F18 WebSearchTool（Tavily）+ DirectAnswerTool
 
 ---
 
@@ -162,3 +162,15 @@ Progress: 16/22 · Last: F22 Eval A/B + Wave 1 ST 测试用例 · Next: (Wave 1 
 
 **Documents updated**: docs/PR/PR-2026-07-07-f22-eval-ab-st-cases.md、6 篇 docs/test-cases/feature-17~22.md
 **Next**: (Wave 1 收尾；feature-list.json F17~F22 状态翻 passing 由 ST 执行确认 + feature-list.json 更新流程触发)
+
+### Feature #17: Tool 抽象 + KnowledgeBaseSearchTool — PASS
+- Completed: 2026-08-03
+- Service dependencies: No runtime service startup required for automated scope; unit tests mock RagService boundary. Real LLM/DB/Chroma scenarios remain PENDING-MANUAL in Feature-ST.
+- TDD: green ✓ (11/11 F17 tests; Wave 1 regression group 36/36)
+- Quality Gates: 100% line, 92.3% branch, 90% mutation
+- Feature-ST: 12 cases documented; 9 automated Mock cases PASS; 3 external Real cases PENDING-MANUAL
+- Inline Check: PASS (P2: 4/4 contract groups, T2: 10/10 inventory rows, D3: OK, U1: N/A)
+- Git: 6f00cf3 feat: Tool 抽象 + KnowledgeBaseSearchTool (#17)
+#### Risks
+- ⚠ [Mutant/Minor] `KnowledgeBaseSearchTool.java:64` — trace summary source condition has one surviving mutant; mutation score remains 90%, follow up with exact summary matcher.
+- ⚠ [Dependency/Major] 3 个真实 LLM/数据库/Chroma 场景尚未执行；上线前需在完整服务环境补做。
