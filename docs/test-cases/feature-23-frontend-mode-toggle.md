@@ -1,138 +1,316 @@
-# Feature #23 — 前端对话模式切换 UI（per-conversation RAG 模式）
+# 测试用例集: 前端对话模式切换 UI
 
-| 项目 | 内容 |
-|------|------|
-| **Feature ID** | #23 |
-| **关联类** | `ConfigController`、`stores/config.js`、`stores/chat.js`、`RagModeToggle.vue` |
-| **关联需求** | FR-012（Agentic 问答模式） |
-| **前置依赖** | F17~F21（agent loop + trace 落库）+ F20（rag.mode 路由 + per-conversation 覆盖） |
-| **优先级** | P1（用户体验） |
-| **编写日期** | 2026-07-07 |
+**Feature ID**: 23
+**关联需求**: FR-012（per-conversation 模式切换）
+**日期**: 2026-08-03
+**测试标准**: ISO/IEC/IEEE 29119-3
+**模板版本**: 1.0
+
+## 摘要
+
+| 类别 | 用例数 |
+|------|--------|
+| functional | 5 |
+| ui | 1 |
+| **合计** | **6** |
+
+> UI 类别用 Chrome DevTools MCP 在前端验证；后端路由由 F20 保证。
+
+## 测试用例
+
+### 用例编号
+
+ST-FUNC-023-001
+
+### 关联需求
+
+FR-012 模式切换持久化
+
+### 测试目标
+
+验证点击 RagModeToggle 切换后调用 PATCH 并持久化到 Conversation.rag_mode。
+
+### 前置条件
+
+- 已登录用户 + 已存在 conversation
+- configStore 已加载
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | 点击 agentic pill | toggle 显示 agentic 激活 |
+| 2 | chatStore.updateRagMode 派发 | PATCH /api/conversations/{id}/rag-mode 调用 |
+| 3 | 响应 200 | state 提交 |
+| 4 | 重新查询 conversation | rag_mode = agentic |
+
+### 验证点
+
+- 模式切换端到端生效。
+
+### 后置检查
+
+- 关闭 PATCH 监听。
+
+### 元数据
+
+- **优先级**: High
+- **类别**: functional
+- **已自动化**: No
+- **手动测试原因**: external-action: 需真实后端 + 浏览器交互。
+- **测试引用**: N/A
+- **Test Type**: Real
 
 ---
 
-## 1. 功能概述
+### 用例编号
 
-### 1.1 背景
+ST-FUNC-023-002
 
-Wave 1 Agentic RAG 在后端已具备 per-conversation RAG 模式（conv.rag_mode 字段，PATCH /api/conversations/{id}/rag-mode）。前端缺少 UI 入口，用户只能在对话组维度切换模式（不可见）。
+### 关联需求
 
-### 1.2 新增
+FR-012 切换后走 agentic
 
-- **后端** `GET /api/config` 暴露 `rag.mode` 全局默认值，前端无需硬编码
-- **前端** `RagModeToggle` 两-pill 切换组件，挂在 ChatView 顶部消息区上方
-- **store** 新增 `configStore`（全局默认值）+ `chat.currentConversation` / `effectiveRagMode` / `updateRagMode()`
-- **生效逻辑**：前端 `effectiveRagMode = conv.rag_mode ?? globalRagMode`，后端 `ChatService` 同样：`conversation.rag_mode > application.rag.mode`
+### 测试目标
 
-### 1.3 用户路径
+验证切换到 agentic 后，下次提问进入 agentic 路径。
 
-1. 用户登录，进入对话界面，看 KB 列表
-2. 选知识库后 ChatView 顶部出现"传统 / 智能体"切换条
-3. 当前未选对话 → 默认显示全局值（如 linear），disabled
-4. 选/新建对话 → toggle 可用，显示当前生效模式
-5. 点击"智能体"→ 立即乐观更新 UI（无需等后端），发 PATCH，失败回滚 + Toast
+### 前置条件
+
+- conversation.rag_mode = agentic
+- 后端启动正常
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | 切换为 agentic | 持久化完成 |
+| 2 | 发送提问 | 走 AgenticRagService |
+| 3 | 验证 ChatResult.agentMode | "agentic" |
+
+### 验证点
+
+- 前端切换 → 后端 agentic 路径。
+
+### 后置检查
+
+- 关闭会话。
+
+### 元数据
+
+- **优先级**: High
+- **类别**: functional
+- **已自动化**: No
+- **手动测试原因**: external-action: 需真实后端 + LLM。
+- **测试引用**: N/A
+- **Test Type**: Real
 
 ---
 
-## 2. 验收用例（devtools 手动）
+### 用例编号
 
-### 2.1 ST-23-1 toggle 显示与默认态
+ST-FUNC-023-003
 
-**前置**：用户登录、`application.properties` 中 `rag.mode=linear`
+### 关联需求
 
-| Step | 操作 | 期望 |
+FR-012 新对话继承全局
+
+### 测试目标
+
+验证新对话的 mode 继承全局 rag.mode 默认值。
+
+### 前置条件
+
+- 全局 `rag.mode=linear`
+- 创建一个新 conversation
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
 |---|---|---|
-| 1 | 打开 `/`，选任一 KB | ChatView 顶部出现"传统 / 智能体"pill 切换条 |
-| 2 | 此时未选/无对话组 | toggle disabled；"传统"高亮（linear=white bg） |
-| 3 | 浏览器控制台 `useConfigStore().ragMode` | 返回 `"linear"` |
-| 4 | 浏览器控制台 `useChatStore().effectiveRagMode` | 返回 `"linear"`（fallback 全局默认） |
+| 1 | 创建新 conversation | conv.rag_mode = null |
+| 2 | 渲染 toggle | 显示 linear 激活 |
+| 3 | 发送提问 | 走 linear RagService |
 
-### 2.2 ST-23-2 切换到智能体模式并持久化
+### 验证点
 
-**前置**：已有对话组（任一 KB）
+- 有效继承公式 conv.rag_mode ?? globalRagMode。
 
-| Step | 操作 | 期望 |
-|---|---|---|
-| 1 | 点击 toggle 上的"智能体" | 立即变色（品牌紫渐变 + 白文）；"传统"恢复正常态 |
-| 2 | 控制台 `useChatStore().currentConversation.ragMode` | 立即返回 `"agentic"`（乐观更新） |
-| 3 | DevTools Network → PATCH `/api/conversations/{id}/rag-mode` | 200，body 含 `"ragMode":"agentic"` |
-| 4 | DB：`SELECT rag_mode FROM conversation WHERE id=?` | 该会话 rag_mode = `agentic` |
-| 5 | 刷新页面 | toggle 仍显示"智能体"（已持久化） |
-| 6 | 切换回"传统" | 同理，rag_mode = `linear` |
+### 后置检查
 
-### 2.3 ST-23-3 切换后实际路由生效
+- 删除测试 conversation。
 
-**前置**：已完成 ST-23-2 第 1 步（切到智能体）
+### 元数据
 
-| Step | 操作 | 期望 |
-|---|---|---|
-| 1 | 发提问"产品A价格"（KB 内无答案） | 后端走 AgenticRagService 路径 |
-| 2 | DB：`SELECT round, tool_name FROM agent_trace WHERE chat_id=?` | 至少 1 行（kb_search 或 web_search） |
-| 3 | DB：`SELECT JSON_EXTRACT(rag_metadata, '$.agent_mode') FROM chat_history WHERE chat_id=?` | `"agentic"` |
-| 4 | DevTools Network → POST `/api/chat/stream` | 流式响应里出现 `event: agent_step` 行 |
-| 5 | 切回 linear 再发同样的提问 | agent_trace 不再写入；rag_metadata.agent_mode = `linear` |
-
-### 2.4 ST-23-4 新对话默认继承全局
-
-**前置**：控制台 `useConfigStore().ragMode="agentic"`（操作员改后端配置 + 重启服务；前端 store 缓存 cold start）
-
-| Step | 操作 | 期望 |
-|---|---|---|
-| 1 | 在线性对话旁点"新建对话" | toggle 仍 disabled（需要先切到该对话） |
-| 2 | 切换到新对话 | toggle 可用，"智能体"高亮（继承全局） |
-| 3 | 控制台 `useChatStore().effectiveRagMode` | `"agentic"` |
-| 4 | 控制台 `useChatStore().currentConversation.ragMode` | `null`（未覆盖） |
-| 5 | DB `SELECT rag_mode FROM conversation WHERE id=?` | `NULL` |
-
-### 2.5 ST-23-5 失败回滚
-
-**前置**：用浏览器 Network Throttling / Mock Server 改 PATCH 返回 500
-
-| Step | 操作 | 期望 |
-|---|---|---|
-| 1 | 点击另一模式 | UI 先变（乐观） |
-| 2 | 等 ~1s，请求返回 500 | 触发 store 内的 catch：UI 回滚到原值 + 全局 Toast 红条"切换失败：..." |
-| 3 | 控制台 `currentConversation.ragMode` | 仍是旧值（非乐观值） |
-| 4 | DB `SELECT rag_mode FROM conversation WHERE id=?` | 仍是旧值（未持久化） |
-
-### 2.6 ST-23-6 流式锁定
-
-**前置**：发一长问题触发流式
-
-| Step | 操作 | 期望 |
-|---|---|---|
-| 1 | 流式问答进行中 | toggle `disabled`（视觉上半透明），不可点击 |
-| 2 | 流结束 | toggle 恢复可点 |
-| 3 | 切换模式立即生效 | 进入下一轮问答用新 mode |
+- **优先级**: High
+- **类别**: functional
+- **已自动化**: No
+- **手动测试原因**: external-action: 需真实后端 + 浏览器。
+- **测试引用**: N/A
+- **Test Type**: Real
 
 ---
 
-## 3. 自动化测试覆盖
+### 用例编号
 
-| 层级 | 文件 | 用例 |
+ST-FUNC-023-004
+
+### 关联需求
+
+FR-012 失败回滚
+
+### 测试目标
+
+验证 PATCH 失败时状态回滚并显示错误 Toast。
+
+### 前置条件
+
+- 模拟 PATCH 端点返回 5xx
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
 |---|---|---|
-| 后端单测 | `ConfigControllerTest.java` | `ragMode` 注入 + 历史窗口注入 |
-| 前端构建 | `npm run build` | vite production build 成功，无新增警告 |
-| 后端回归 | `mvn test` | 108/108（+2 F23，新增 ConfigControllerTest） |
+| 1 | 点击切换 | 乐观更新 |
+| 2 | PATCH 失败 | 状态回滚到原 mode |
+| 3 | Toast 出现 | 错误提示可见 |
+
+### 验证点
+
+- 乐观更新失败不留下脏状态。
+
+### 后置检查
+
+- 关闭拦截。
+
+### 元数据
+
+- **优先级**: Medium
+- **类别**: functional
+- **已自动化**: No
+- **手动测试原因**: external-action: 需浏览器网络拦截。
+- **测试引用**: N/A
+- **Test Type**: Real
 
 ---
 
-## 4. 非功能验证
+### 用例编号
 
-| 项 | 校验 |
-|---|---|
-| 鉴权 | `/api/config` 与 `/api/**` 同规，受 Spring Security 保护（需已登录） |
-| 性能 | `fetchConfig` 只在 ChatView onMounted 拉一次，store 内 `loaded` flag 防重复 |
-| 失败隔离 | `updateRagMode` store catch：回滚 + Toast；不抛 axios 错误给上层 |
-| 离线 | config fetch 失败时 fallback `linear`（前端默认值兜底） |
-| 跨对话 | 切换对话 → effectiveRagMode 自动重算（computed 依赖 currentConversation） |
-| 流式锁定 | streaming 期间 toggle disabled，避免半路切 mode 引起流混乱 |
+ST-FUNC-023-005
+
+### 关联需求
+
+FR-012 流式锁定
+
+### 测试目标
+
+验证流式问答期间 toggle 禁用。
+
+### 前置条件
+
+- 流式问答进行中
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | 触发流式问答 | toggle disabled |
+| 2 | 完成流式问答 | toggle 恢复可点 |
+
+### 验证点
+
+- 防止半路切换错配。
+
+### 后置检查
+
+- 关闭会话。
+
+### 元数据
+
+- **优先级**: Medium
+- **类别**: functional
+- **已自动化**: No
+- **手动测试原因**: external-action: 需真实后端 + 浏览器。
+- **测试引用**: N/A
+- **Test Type**: Real
 
 ---
 
-## 5. 不在范围内
+### 用例编号
 
-- 不同 KB 的 mode 偏好（per-KB）：当前模型用 conversation 维度
-- mode 切换的快捷键（如 ⌘⇧M）：未实现
-- per-message 维度（单条问答 override）：F19/F20 模型只支持 conversation 维度
-- F21 SSE `agent_step` 事件的前端可视化：本 ST 仅验证 event 行存在；UI 动画留 P3
+ST-UI-023-001
+
+### 关联需求
+
+UCD 与 UI 渲染
+
+### 测试目标
+
+验证 toggle 渲染与激活态。
+
+### 前置条件
+
+- 应用启动到 ChatView
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | evaluate_script(error_detector) | 控制台 0 error |
+| 2 | take_snapshot | EXPECT: toggle 存在，两个 pill（ListOrdered + Sparkles）；REJECT: 任何渲染空白或无 label 元素 |
+| 3 | querySelector 验证 active mode | 当前 mode 正确高亮 |
+
+### 验证点
+
+- UI 与 UCD 一致。
+
+### 后置检查
+
+- 关闭浏览器。
+
+### 元数据
+
+- **优先级**: Medium
+- **类别**: ui
+- **已自动化**: No
+- **手动测试原因**: external-action: 需 Chrome DevTools MCP 浏览器验证。
+- **测试引用**: N/A
+- **Test Type**: Real
+
+## 可追溯矩阵
+
+| 用例 ID | 关联需求 | verification_step | 自动化测试 | Test Type | 结果 |
+|---------|----------|-------------------|-----------|----------|------|
+| ST-FUNC-023-001 | FR-012 | verification_step[0] | N/A | Real | PENDING-MANUAL |
+| ST-FUNC-023-002 | FR-012 | verification_step[1] | N/A | Real | PENDING-MANUAL |
+| ST-FUNC-023-003 | FR-012 | verification_step[2] | N/A | Real | PENDING-MANUAL |
+| ST-FUNC-023-004 | FR-012 | failure rollback | N/A | Real | PENDING-MANUAL |
+| ST-FUNC-023-005 | FR-012 | streaming lock | N/A | Real | PENDING-MANUAL |
+| ST-UI-023-001 | UCD | visual | N/A | Real | PENDING-MANUAL |
+
+## Real Test Case Execution Summary
+
+| Metric | Count |
+|--------|-------|
+| Total Real Test Cases | 6 |
+| Passed | 0 |
+| Failed | 0 |
+| Pending | 6 |
+
+## Manual Test Case Summary
+
+| Metric | Count |
+|--------|-------|
+| Total Manual Test Cases | 6 |
+| Manual Passed (MANUAL-PASS) | 0 |
+| Manual Failed (MANUAL-FAIL) | 0 |
+| Blocked | 0 |
+| Pending (PENDING-MANUAL) | 6 |
+
+> 所有 6 个场景需真实后端 + 浏览器环境（Chrome DevTools MCP），本次未执行。
+
+## 自动化验收执行证据
+
+- 已有前端 RagModeToggle.vue + chat.js + config.js + conversation.js；
+- 已有后端 GET /api/config + PATCH /api/conversations/{id}/rag-mode（F20 + F23 历史 commit）；
+- 单元/UI 自动化未在本轮跑通，全部 PENDING-MANUAL。
