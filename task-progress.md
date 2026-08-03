@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 22/23 · Last: F23 前端对话模式切换 UI（2026-08-03） · Next: F22 Eval A/B + ST 测试用例
+Progress: 23/23 · Last: F22 Eval A/B + ST 测试用例（2026-08-03） · Next: 进入 ST 系统测试阶段
 
 ---
 
@@ -227,3 +227,13 @@ Progress: 22/23 · Last: F23 前端对话模式切换 UI（2026-08-03） · Next
 - Git: 5dd06e5 feat: 前端对话模式切换 UI (#23)
 #### Risks
 - ⚠ [UI/Major] 6 个前端 UI 场景 PENDING-MANUAL，需 Chrome DevTools MCP 验证。
+
+### Feature #22: Eval A/B + ST 测试用例 — PASS
+- Completed: 2026-08-03
+- Service dependencies: 真实 LLM + DB + Chroma 端到端。
+- TDD: green ✓ (EvalServiceAbCompareTest 3/3)
+- Feature-ST: 4 cases documented; 3 自动化 Mock PASS；1 真实端到端 PENDING-MANUAL
+- Inline Check: PASS
+- Git: 727f83c feat: Eval A/B + ST 测试用例 (#22)
+#### Risks
+- ⚠ [Dependency/Major] 真实端到端 A/B 评估 PENDING-MANUAL。
