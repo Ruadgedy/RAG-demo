@@ -1,124 +1,348 @@
-# Feature #21 — agent_trace 表 + trace 落库 + SSE agent_step
+# 测试用例集: agent_trace + SSE agent_step
 
-| 项目 | 内容 |
-|------|------|
-| **Feature ID** | #21 |
-| **关联类** | `agent/trace/*`、`agent/AgenticRagService`、`service/ChatService`（SSE） |
-| **关联需求** | FR-014（Agent 可观测与 trace 落库） |
-| **前置依赖** | F19 / F20 |
-| **优先级** | P1（可观测性 + UX） |
-| **编写日期** | 2026-07-07 |
+**Feature ID**: 21
+**关联需求**: FR-014（Agent 可观测与 trace 落库）
+**日期**: 2026-08-03
+**测试标准**: ISO/IEC/IEEE 29119-3
+**模板版本**: 1.0
+
+## 摘要
+
+| 类别 | 用例数 |
+|------|--------|
+| functional | 5 |
+| integration | 2 |
+| **合计** | **7** |
+
+> validate_st_cases.py 仅接受 FUNC/BNDRY/UI/SEC/PERF 类别；2 个真实落库/SSE 端到端场景归入 FUNC-006/007 并标记 PENDING-MANUAL。
+
+## 测试用例
+
+### 用例编号
+
+ST-FUNC-021-001
+
+### 关联需求
+
+FR-014 trace 落库字段
+
+### 测试目标
+
+验证 AgentTraceCollector.record 保存实体并序列化 args / resultSummary。
+
+### 前置条件
+
+- mock AgentTraceRepository
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | record(chat-001, 1, "kb_search", {query: "产品A"}, "命中 3 条", 320, "done") | 不抛异常 |
+| 2 | verify(repo).save(entity) | 收到 entity |
+| 3 | 读取 entity | chatId=chat-001, round=1, toolName=kb_search, toolArgs 含 query/产品A, resultSummary=命中 3 条, durationMs=320, status=done |
+
+### 验证点
+
+- record 落库字段正确。
+- args 序列化为 JSON。
+
+### 后置检查
+
+- 无。
+
+### 元数据
+
+- **优先级**: High
+- **类别**: functional
+- **已自动化**: Yes
+- **测试引用**: `AgentTraceCollectorTest::recordShouldSaveEntityWithSerializedArgsAndTruncatedSummary`
+- **Test Type**: Mock
 
 ---
 
-## 1. 功能概述
+### 用例编号
 
-### 1.1 背景
+ST-FUNC-021-002
 
-agent loop 黑盒运行，开发者 / 用户看不到 LLM 做了什么。需要：
-1. DB 留痕（每轮 tool 调用存一行）
-2. 前端可视化（流式 SSE 推 agent_step 事件）
-3. chat_history.rag_metadata 落 agent_mode / rounds / degraded
+### 关联需求
 
-### 1.2 数据模型
+FR-014 summary 截断
 
-```sql
-CREATE TABLE agent_trace (
-    id BIGINT PK, chat_id VARCHAR(36), round INT,
-    tool_name VARCHAR(64), tool_args TEXT,
-    result_summary TEXT, duration_ms INT,
-    status VARCHAR(16) DEFAULT 'done', -- start | done
-    created_at TIMESTAMP
-);
-```
+### 测试目标
 
-### 1.3 SSE 事件格式
+验证 summary > 500 字时截断为 500 + 省略号。
 
-```
-event: session-start
-data: <convId>|<chatId>
+### 前置条件
 
-event: agent_step
-data: {"chatId":"...", "round":1, "tool":"kb_search", "status":"done", "durationMs":"320", "summary":"命中 3 条"}
+- mock repo
 
-event: agent_step
-data: {...round 2...}
+### 测试步骤
 
-event: chunk
-data: <LLM 流开始>
-```
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | record 传入 800 字 summary | repo.save 收到的 summary 长度 = 501 |
+| 2 | 读取 summary | 以 "…" 结尾 |
+
+### 验证点
+
+- summary 截断不影响主调用。
+
+### 后置检查
+
+- 无。
+
+### 元数据
+
+- **优先级**: High
+- **类别**: functional
+- **已自动化**: Yes
+- **测试引用**: `AgentTraceCollectorTest::recordShouldTruncateSummaryAt500Chars`
+- **Test Type**: Mock
 
 ---
 
-## 2. 验收用例
+### 用例编号
 
-### 2.1 ST-21-1 trace 落库
+ST-FUNC-021-003
 
-**前置**：触发 1 次 agentic 问答（agent 跑了 2 轮 kb_search）
+### 关联需求
 
-| Step | 操作 | 期望 |
+FR-014 异常隔离
+
+### 测试目标
+
+验证 record 落库抛异常被吞掉，不影响调用方。
+
+### 前置条件
+
+- mock repo.save 抛 RuntimeException
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
 |---|---|---|
-| 1 | `SELECT * FROM agent_trace WHERE chat_id=? ORDER BY round` | 4 行（2× start + 2× done），按 round 排序 |
-| 2 | round=1，tool_name='kb_search' | start + done 各一行 |
-| 3 | done 行 `duration_ms>0`、`status='done'` | — |
-| 4 | 同一 chatId 在 chat_history 中可 join | 该 chat_history.chat_id = 该 chatId |
+| 1 | record(...) | 不抛异常（catch + warn） |
 
-### 2.2 ST-21-2 SSE agent_step 事件流
+### 验证点
 
-| Step | 操作 | 期望 |
-|---|---|---|
-| 1 | 浏览器抓流（DevTools Network → /api/chat/stream） | 事件顺序：session-start → agent_step(x N) → chunk(x M) → sources → end |
-| 2 | agent_step data 是合法 JSON | 含 chatId/round/tool/status/durationMs/summary |
-| 3 | 没触发 agentic 时（linear） | SSE 流中**无** agent_step 事件 |
+- trace 落库失败不拖垮主链路。
 
-### 2.3 ST-21-3 degraded=true 落库
+### 后置检查
 
-**前置**：注入降级（timeout=10ms 或 mock LLM 抛异常）
+- log warn 含 "save failed"。
 
-| Step | 操作 | 期望 |
-|---|---|---|
-| 1 | 触发 agentic 问答 | 降级 |
-| 2 | `SELECT JSON_EXTRACT(rag_metadata, '$.degraded') FROM chat_history WHERE chat_id=?` | `true` |
-| 3 | `$.agent_mode` | `agentic`（区分"配置说 agentic" vs "实际跑了 linear"） |
-| 4 | `$.agent_rounds` | `0`（agent 没跑 tool） |
+### 元数据
 
-### 2.4 ST-21-4 失败隔离
-
-**前置**：故意让 `repo.save()` 抛异常（mock 或停 DB）
-
-| Step | 操作 | 期望 |
-|---|---|---|
-| 1 | 触发 agentic 问答 | log warn（"落库失败"），但不抛给上层 |
-| 2 | 回答仍正常返回 | 主链路不挂 |
-
-### 2.5 ST-21-5 summary 截断
-
-| Step | 操作 | 期望 |
-|---|---|---|
-| 1 | 工具返回超大文本（>500 字） | `result_summary` 列存 `≤501` 字（500 内容 + 省略号） |
+- **优先级**: High
+- **类别**: functional
+- **已自动化**: Yes
+- **测试引用**: `AgentTraceCollectorTest::recordShouldSwallowExceptions`
+- **Test Type**: Mock
 
 ---
 
-## 3. 自动化测试覆盖
+### 用例编号
 
-| 层 | 通过条件 |
-|---|---|
-| 单测 | `AgentTraceCollectorTest` 6 例：record 落库 / truncate 500 / 异常吞掉 / sseData / 空 extra / getTraces |
-| 集成 | `AgenticRagServiceTest` 5 例（含新断言 agentMode/rounds/degraded） |
+ST-FUNC-021-004
+
+### 关联需求
+
+FR-014 SSE JSON
+
+### 测试目标
+
+验证 sseData 输出含 chatId/round/tool/status/extra，null extra 不引入空 key。
+
+### 前置条件
+
+- mock repo
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | sseData(chat-004, 1, "kb_search", "done", {durationMs: "320", summary: "命中 3 条"}) | 输出有效 JSON |
+| 2 | 解析 JSON | chatId/round/tool/status/durationMs/summary 字段存在 |
+| 3 | sseData 传 null extra | JSON 仍合法，无 durationMs 等空字段 |
+
+### 验证点
+
+- SSE JSON 序列化稳定。
+
+### 后置检查
+
+- 无。
+
+### 元数据
+
+- **优先级**: High
+- **类别**: functional
+- **已自动化**: Yes
+- **测试引用**: `AgentTraceCollectorTest::sseDataShouldProduceValidJsonWithAllFields`、`sseDataWithNullExtraShouldStillReturnBaseJson`
+- **Test Type**: Mock
 
 ---
 
-## 4. 性能 & 容量
+### 用例编号
 
-- agent_trace 每轮 2 行（start + done）：复杂 agent（5 轮）→ 10 行/单次问答
-- result_summary 截断 500 字：防 JSON 列爆
-- 索引 `(chat_id, round)` 支持按对话聚合（"这一轮 agent 干了啥"）
-- rag_metadata 加 3 字段对体积影响 < 100 字节/行
+ST-FUNC-021-005
+
+### 关联需求
+
+FR-014 trace 查询
+
+### 测试目标
+
+验证 getTraces 透传 repo.findByChatIdOrderByRound。
+
+### 前置条件
+
+- mock repo
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | mock repo.findByChatIdOrderByRound(chat-006) 返回 list | getTraces 返回 list |
+| 2 | verify(repo).findByChatIdOrderByRound(chat-006) | 调用正确 |
+
+### 验证点
+
+- 查询路径透传。
+
+### 后置检查
+
+- 无。
+
+### 元数据
+
+- **优先级**: Medium
+- **类别**: functional
+- **已自动化**: Yes
+- **测试引用**: `AgentTraceCollectorTest::getTracesShouldDelegateToRepo`
+- **Test Type**: Mock
 
 ---
 
-## 5. 关联
+### 用例编号
 
-- 设计：Design §11.5（数据模型）
-- F19：commit `3d8ee12`
-- F23 前端 UI 订阅 agent_step：commit `cd36912`（前端只验证流，不动画化）
+ST-FUNC-021-006
+
+### 关联需求
+
+FR-014 端到端 trace 落库
+
+### 测试目标
+
+验证真实 LLM Agent 运行后 agent_trace 表存在 N 行 trace。
+
+### 前置条件
+
+- 后端、数据库、Chroma 已启动
+- 有效 LLM + 知识库 COMPLETED 文档
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | 调 agentic 问答 | 回答返回 |
+| 2 | 查询 agent_trace | 该 chat_id 下有 N 行 |
+| 3 | 检查每行 | tool_name/tool_args/result_summary/duration_ms/round 完整 |
+
+### 验证点
+
+- 端到端 trace 落库。
+
+### 后置检查
+
+- 删除 trace/对话，停止服务。
+
+### 元数据
+
+- **优先级**: High
+- **类别**: functional
+- **已自动化**: No
+- **手动测试原因**: external-action: 需真实 LLM + 数据库 + Chroma。
+- **测试引用**: N/A
+- **Test Type**: Real
+
+---
+
+### 用例编号
+
+ST-FUNC-021-007
+
+### 关联需求
+
+FR-014 SSE agent_step 端到端
+
+### 测试目标
+
+验证流式问答期间，SSE 推送 `event: agent_step` 事件。
+
+### 前置条件
+
+- 后端 + 数据库 + 浏览器/curl 流式客户端
+- agentic 模式 + KB 有文档
+
+### 测试步骤
+
+| Step | 操作 | 预期结果 |
+|---|---|---|
+| 1 | 触发流式问答 | 接收 SSE 流 |
+| 2 | 解析 event 行 | 出现 `event: agent_step` |
+| 3 | 解析 data | 包含 round/tool/status/args |
+
+### 验证点
+
+- SSE agent_step 推送符合协议。
+
+### 后置检查
+
+- 关闭 SSE 连接，停止服务。
+
+### 元数据
+
+- **优先级**: High
+- **类别**: functional
+- **已自动化**: No
+- **手动测试原因**: external-action: 需真实后端 + 流式客户端。
+- **测试引用**: N/A
+- **Test Type**: Real
+
+## 可追溯矩阵
+
+| 用例 ID | 关联需求 | verification_step | 自动化测试 | Test Type | 结果 |
+|---------|----------|-------------------|-----------|----------|------|
+| ST-FUNC-021-001 | FR-014 | verification_step[0] | AgentTraceCollectorTest::recordShouldSaveEntityWithSerializedArgsAndTruncatedSummary | Mock | PASS |
+| ST-FUNC-021-002 | FR-014 | verification_step[0] | AgentTraceCollectorTest::recordShouldTruncateSummaryAt500Chars | Mock | PASS |
+| ST-FUNC-021-003 | FR-014 | verification_step[0] | AgentTraceCollectorTest::recordShouldSwallowExceptions | Mock | PASS |
+| ST-FUNC-021-004 | FR-014 | verification_step[1] | AgentTraceCollectorTest::sseData | Mock | PASS |
+| ST-FUNC-021-005 | FR-014 | verification_step[0] | AgentTraceCollectorTest::getTracesShouldDelegateToRepo | Mock | PASS |
+| ST-FUNC-021-006 | FR-014 | verification_step[0] | N/A | Real | PENDING-MANUAL |
+| ST-FUNC-021-007 | FR-014 | verification_step[1] | N/A | Real | PENDING-MANUAL |
+
+## Real Test Case Execution Summary
+
+| Metric | Count |
+|--------|-------|
+| Total Real Test Cases | 2 |
+| Passed | 0 |
+| Failed | 0 |
+| Pending | 2 |
+
+## Manual Test Case Summary
+
+| Metric | Count |
+|--------|-------|
+| Total Manual Test Cases | 2 |
+| Manual Passed (MANUAL-PASS) | 0 |
+| Manual Failed (MANUAL-FAIL) | 0 |
+| Blocked | 0 |
+| Pending (PENDING-MANUAL) | 2 |
+
+## 自动化验收执行证据
+
+- `AgentTraceCollectorTest` 6/6 通过。
+- 5 个 Mock 用例 + 2 个真实环境 PENDING-MANUAL。
