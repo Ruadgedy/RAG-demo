@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 17/23 · Last: F17 Tool 抽象 + KnowledgeBaseSearchTool（2026-08-03） · Next: F18 WebSearchTool（Tavily）+ DirectAnswerTool
+Progress: 18/23 · Last: F18 WebSearchTool（Tavily）+ DirectAnswerTool（2026-08-03） · Next: F19 AgenticRagService + agent loop + 降级
 
 ---
 
@@ -174,3 +174,15 @@ Progress: 17/23 · Last: F17 Tool 抽象 + KnowledgeBaseSearchTool（2026-08-03�
 #### Risks
 - ⚠ [Mutant/Minor] `KnowledgeBaseSearchTool.java:64` — trace summary source condition has one surviving mutant; mutation score remains 90%, follow up with exact summary matcher.
 - ⚠ [Dependency/Major] 3 个真实 LLM/数据库/Chroma 场景尚未执行；上线前需在完整服务环境补做。
+
+### Feature #18: WebSearchTool（Tavily）+ DirectAnswerTool — PASS
+- Completed: 2026-08-03
+- Service dependencies: Tavily Web API（外部 HTTP）。自动化测试通过 Mockito spy + 真实 RestClient.Builder 完成，不调用外部网络。
+- TDD: green ✓ (18/18 F18 tests; Wave 1 regression 36/36)
+- Quality Gates: 98.8% line, 89.3% branch, 84% mutation
+- Feature-ST: 10 cases documented; 8 自动化 Mock cases PASS；2 真实 Tavily HTTP 场景 PENDING-MANUAL
+- Inline Check: PASS (P2: 5/5 contract methods, T2: 16/16 inventory rows covered, D3: OK, U1: N/A)
+- Git: 08e066a feat: WebSearchTool + DirectAnswerTool (#18)
+#### Risks
+- ⚠ [Dependency/Major] `TAVILY_API_KEY` 当前为空；真实 Tavily 401/200 场景 PENDING-MANUAL，需有 key 后在隔离环境补测。
+- ⚠ [Mutant/Minor] WebSearchTool 存在 2 个 timeout setter 等价变异 + 2 个 stream 条件变异；Mutation 84% 已达门槛。

@@ -326,7 +326,7 @@
       "title": "WebSearchTool（Tavily）+ DirectAnswerTool",
       "description": "WebSearchTool 调 Tavily API 返回 top-N 摘要；无 TAVILY_API_KEY 时不注册。DirectAnswerTool 处理闲聊/常识类直接回答",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "wave": 1,
       "srs_trace": ["FR-013"],
       "verification_steps": [
@@ -335,7 +335,11 @@
         "Given 闲聊问题, when agent 判断无需检索, then 调用 DirectAnswerTool 直接回答"
       ],
       "dependencies": [17],
-      "ui": false
+      "ui": false,
+      "st_case_path": "docs/test-cases/feature-18-websearch-directanswer-tool.md",
+      "st_case_count": 10,
+      "git_sha": "08e066a",
+      "report_path": "docs/report/feature-18-websearch-directanswer-report.md"
     },
     {
       "id": 19,

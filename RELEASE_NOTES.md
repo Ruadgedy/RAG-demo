@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- F18（2026-08-03）：WebSearchTool（Tavily）+ DirectAnswerTool 验收闭环
+  - 新增 `docs/features/2026-08-03-f18-websearch-directanswer.md` 详细设计文档
+  - `WebSearchToolTest` 扩展至 14 例 / `DirectAnswerToolTest` 4 例，新增 topK 生效、超时降级、trace start/done 三分支
+  - Feature-ST 文档（10 用例）通过 `validate_st_cases.py`，8 个自动化 Mock 用例 PASS，2 个真实 Tavily HTTP 场景 PENDING-MANUAL
+  - Quality Gates：F18 行覆盖 98.8%、分支覆盖 89.3%、变异分数 84%
 - F17（2026-08-03）：Tool 抽象 + KnowledgeBaseSearchTool 验收闭环
   - 新增 `docs/features/2026-08-03-f17-tool-abstraction.md` 详细设计文档
   - `KnowledgeBaseSearchToolTest` 扩展至 11 例，覆盖 kbId 上下文注入、空结果、来源去重、Spring AI `@Tool` 注册、trace start/done 分支
