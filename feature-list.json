@@ -368,7 +368,7 @@
       "title": "rag.mode 路由 + ChatService 集成 + per-conversation mode",
       "description": "application.properties 加 rag.mode（默认 linear，全局默认值）；Conversation 表加 rag_mode 字段（Flyway，per-conversation 覆盖）；chat API 接受 mode 参数；ChatService 路由优先级：conversation.rag_mode > 全局 rag.mode；linear 行为完全不变",
       "priority": "high",
-      "status": "failing",
+      "status": "passing",
       "wave": 1,
       "srs_trace": ["FR-012"],
       "verification_steps": [
@@ -379,7 +379,11 @@
         "Given 用户切换 mode, when 调 PATCH /api/conversations/{id}/rag-mode, then Conversation.rag_mode 持久化"
       ],
       "dependencies": [19],
-      "ui": false
+      "ui": false,
+      "st_case_path": "docs/test-cases/feature-20-rag-mode-routing.md",
+      "st_case_count": 5,
+      "git_sha": "6e6d399",
+      "report_path": "docs/report/feature-20-rag-mode-routing-report.md"
     },
     {
       "id": 21,

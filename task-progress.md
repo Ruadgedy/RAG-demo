@@ -1,7 +1,7 @@
 # Task Progress — rag-qa
 
 ## Current State
-Progress: 19/23 · Last: F19 AgenticRagService + agent loop + 降级（2026-08-03） · Next: F20 rag.mode 路由 + ChatService 集成 + per-conversation mode
+Progress: 20/23 · Last: F20 rag.mode 路由 + ChatService 集成 + per-conversation mode（2026-08-03） · Next: F21 agent_trace + SSE agent_step
 
 ---
 
@@ -197,3 +197,13 @@ Progress: 19/23 · Last: F19 AgenticRagService + agent loop + 降级（2026-08-0
 #### Risks
 - ⚠ [Dependency/Major] 真实 LLM Agent 端到端 PENDING-MANUAL，需完整服务环境补测。
 - ⚠ [Performance/Accepted] 30s 超时上限对流式首字延迟有影响，已通过降级 + null 返回隔离。
+
+### Feature #20: rag.mode 路由 + per-conversation mode — PASS
+- Completed: 2026-08-03
+- Service dependencies: 无新增；依赖 ChatService + ConversationController。
+- TDD: PASS (ChatService 路由 + Controller PATCH)
+- Feature-ST: 5 cases documented; 4 自动化 Mock PASS；1 真实端到端 PENDING-MANUAL
+- Inline Check: PASS
+- Git: 6e6d399 feat: rag.mode 路由 + per-conversation mode (#20)
+#### Risks
+- ⚠ [Dependency/Major] 真实后端 + 数据库 PATCH 端到端 PENDING-MANUAL。
