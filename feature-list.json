@@ -338,7 +338,7 @@
       "ui": false,
       "st_case_path": "docs/test-cases/feature-18-websearch-directanswer-tool.md",
       "st_case_count": 10,
-      "git_sha": "08e066a",
+      "git_sha": "cc0b2d8",
       "report_path": "docs/report/feature-18-websearch-directanswer-report.md"
     },
     {
