@@ -59,9 +59,10 @@ flowchart TB
 | Tomcat HTTP 线程（默认 200） | 处理 HTTP 请求、SSE | `server.tomcat.threads.max` |
 | `documentProcessExecutor` | 文档解析、向量化、入库 | `AsyncConfig`：core=4, max=8, queue=100 |
 | `AgenticRagService` Executor | Agent tool-calling loop | `AgenticRagService` 内部 ExecutorService |
-| `DocumentStatusEventService` Reactor 调度 | 状态 SSE 推送 | Reactor Sinks |
+| `DocumentStatusEventService` Reactor 调度 | 状态 SSE 推送 | `Sinks.Many.multicast().onBackpressureBuffer(100)` |
 | `ScheduledExecutor` | 卡死文档回收 | `DocumentProcessRecoveryScheduler` |
-| `LlmChatMemory` | Spring AI 聊天内存 | `MessageWindowChatMemory(maxMessages=50)` |
+| `AgenticRagService` Executor | Agent tool-calling loop + 30s 总超时 | `CompletableFuture.supplyAsync(...).get(agentTimeoutMs, MILLISECONDS)` |
+| `MessageWindowChatMemory` | Spring AI 聊天内存 | `maxMessages=50` |
 
 线程安全要点：
 
@@ -151,29 +152,60 @@ sequenceDiagram
   participant ChatC as ChatController
   participant ChatS as ChatService
   participant AgentS as AgenticRagService
-  participant Exec as ExecutorService
+  participant Exec as CompletableFuture
   participant Trace as AgentTraceCollector
   participant DB as MySQL
-  participant SSE as ResponseBodyEmitter
+  participant SSE as Flux<ServerSentEvent>
 
   Browser->>Filter: POST /api/chat/stream (JWT)
   Filter->>ChatC: 通过 SecurityFilterChain
   ChatC->>ChatS: executeStreamingChat
   ChatS->>AgentS: chat(chatId, msg, kb, history, window)
-  AgentS->>Trace: 准备 trace
-  AgentS->>Exec: submit(agent loop)
-  par Agent Loop
-    Exec->>Exec: ChatClient.tool-calling
+  AgentS->>AgentS: KnowledgeBaseContext.set(kbId) + TraceContext.set(chatId)
+  AgentS->>Exec: supplyAsync(agent loop)
+  par Agent Loop（可多轮）
+    Exec->>Exec: ChatClient.tools().call()（Spring AI 1.1.x tool-calling）
     Exec->>Trace: record(start)
-    Trace->>DB: save
+    Trace->>DB: save AgentTrace
+    Exec->>Exec: 工具调用（KnowledgeBaseSearchTool/WebSearchTool/DirectAnswerTool）
     Exec->>Trace: record(done)
-    Trace->>DB: save
+    Trace->>DB: save AgentTrace
   end
+  Exec->>AgentS: ChatResult（agentic + rounds + degraded）
   AgentS-->>ChatS: ChatResult
   ChatS-->>SSE: chunks + event: agent_step
-  SSE-->>Browser: SSE stream
+  SSE-->>Browser: SSE stream（Flux）
   Browser->>Browser: useDocumentStream 重连 / Toast
 ```
+
+### 7.1 30s 总超时的实现（F-006 补充）
+
+`AgenticRagService.chat()` 通过 `CompletableFuture` + `get(timeoutMs)` 实现总超时：
+
+```java
+CompletableFuture<RagService.ChatResult> future =
+    CompletableFuture.supplyAsync(() -> {
+        return chatClient.prompt().user(message).tools(kbTool, webTool, directTool)
+            .options(ToolCallingChatOptions.builder()
+                .model(agentModel)
+                .internalToolExecutionEnabled(true)
+                .build())
+            .call().content();
+    }, executor);
+try {
+    String answer = future.get(agentTimeoutMs, TimeUnit.MILLISECONDS);
+} catch (TimeoutException e) {
+    future.cancel(true);  // 中断 Agent loop
+    return degrade();      // 降级 RagService.chat()
+} catch (Exception e) {
+    return degrade();
+} finally {
+    KnowledgeBaseContext.clear();
+    TraceContext.clear();
+}
+```
+
+设计原因：Spring AI 1.1.3 的 `ToolCallingChatOptions` 无 `maxIterations` API，只能用总超时兜底。
 
 ## 8. 异常处理与降级
 
@@ -188,8 +220,10 @@ sequenceDiagram
 
 ## 9. 监控与可观测
 
-- Spring Boot Actuator：`/actuator/health` 健康检查。
+- **Spring Boot Actuator**：`/actuator/health` 健康检查；`/actuator/prometheus` 指标。
+- **springdoc-openapi**：Swagger UI（`/swagger-ui.html`），OpenAPI 3 自动从 Controller 方法生成。
 - agent_trace 表：每轮 tool 调用的完整记录（tool_name / args / summary / duration / status）。
 - chat_history.rag_metadata：包含 `agent_mode` / `agent_rounds` / `degraded`。
 - Eval A/B 报告：linear vs agentic 量化对比。
 - 日志：Spring Boot 默认 logback，trace 落库失败有 `[agent_trace] save failed` warn。
+- **SSE 心跳（F-005 补充）**：当前未显式实现心跳事件，长连接依赖客户端 `useDocumentStream` 的指数退避重连（1s/2s/4s/8s/15s/30s，最多 6 次）。生产前应加 SSE `:\n\n` 心跳或专用 `event: ping`。

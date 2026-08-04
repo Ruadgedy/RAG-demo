@@ -94,6 +94,8 @@ flowchart TB
 
   HSvc --> Bm25
   HSvc --> ChromaS
+  RerankS --> EmbS
+  RerankS -. 可选 .-> RerankExt[(Ollama 重排模型)]
 
   DocS --> DocPS
   DocS --> ChromaS
@@ -285,7 +287,7 @@ flowchart TB
 | Tool 抽象统一返回 `ToolResult` record | 多工具统一格式便于 trace 与 LLM schema 生成 | 工具集可插拔；新增 tool 不影响 ChatClient |
 | kbId / chatId 用 ThreadLocal | 不暴露给 LLM schema generation | 避免 LLM 瞎填或跨库串答 |
 | `internalToolExecutionEnabled=true` + `CompletableFuture` 30s 超时 | Spring AI 1.1.3 无 `maxIterations` API | 避免 agent 死循环；超时降级 linear |
-| RerankService + HybridSearchService | 向量 + BM25 双路召回 | 提升检索召回率 |
+| RerankService + HybridSearchService + Bm25SearchService | 向量 + BM25 双路召回 + 重排序 | 提升检索召回率与精排质量 |
 | Fallback 到 MySQL 余弦相似度 | Chroma 不可用时不挂主链路 | 提升可用性 |
 | 文档处理走 `@Async` 线程池 | 长任务不阻塞 HTTP 线程 | 提升响应；P0 修复过线程安全问题 |
 | Conversation 替代旧的 ChatHistory | 减少 chat_history.rag_metadata JSON 膨胀 | 数据模型清晰 |
@@ -305,11 +307,14 @@ flowchart TB
 | AgenticRagService | DirectAnswerTool | direct_answer |
 | KnowledgeBaseSearchTool | RagService | 复用 retrieve 链路 |
 | WebSearchTool | Tavily API | 外部 HTTP |
-| RagService | HybridSearchService | 混合检索 |
+| RagService | HybridSearchService | 混合检索（向量 + BM25 双路） |
+| RagService | RerankService | 召回重排（TOP_K 精排；Ollama 失败自动降级） |
+| RagService | QueryRewriteService | 查询改写（多轮上下文感知） |
+| RagService | ChromaService | fallback 检索（Chroma 不可用时 MySQL 余弦相似度） |
+| RagService | EmbeddingService | embedding 向量计算 |
 | HybridSearchService | ChromaService | 向量召回 |
 | HybridSearchService | Bm25SearchService | BM25 召回 |
-| RagService | RerankService | 召回重排 |
-| RagService | ChromaService | fallback 检索 |
+| RerankService | EmbeddingService | 重排 embedding（rerank model） |
 | DocumentProcessService | EmbeddingService | 向量化 |
 | DocumentProcessService | ChromaService | 向量入库 |
 | DocumentProcessService | DocumentStatusEventService | 状态广播 |

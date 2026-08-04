@@ -32,6 +32,9 @@ flowchart TB
   subgraph Data["数据与基础设施层"]
     MySQL[("MySQL<br/>(Spring Data JPA)")]
     Chroma[("Chroma<br/>(HTTP)")]
+  end
+
+  subgraph AI["AI 模型服务层"]
     Ollama["Ollama<br/>(Embedding HTTP)"]
     LLM["LLM API<br/>(OpenAI 兼容 / MiniMax)"]
     Tavily["Tavily API<br/>(可选 Web 搜索)"]
@@ -52,6 +55,8 @@ flowchart TB
   OtherSvc --> MySQL
   OtherSvc --> Chroma
 ```
+
+> **修正说明（F-007）**：原版把 Ollama 放在"数据与基础设施层"，与 MySQL/Chroma 同列。但 Ollama 是 HTTP 推理服务（提供 Embedding 模型），与 LLM API、Tavily 同属"AI 模型服务层"。架构上将其独立成层，体现"数据 vs 模型"的分离。
 
 ## 2. 容器视图（C4 Container）
 
@@ -245,7 +250,7 @@ sequenceDiagram
 | 线程上下文 | `KnowledgeBaseContext` / `TraceContext` (ThreadLocal) |
 | 异常隔离 | Agent 工具 `try/catch` + `AgenticRagService` 30s 超时降级 |
 | 配置管理 | `application.properties` 占位符 + `dotenv-spring-boot` 加载 `rag-qa-backend/.env` |
-| 可观测性 | `agent_trace` 表 + `degraded` 字段 + Spring Boot Actuator |
+| 可观测性 | `agent_trace` 表 + `degraded` 字段 + Spring Boot Actuator + springdoc-openapi |
 
 ## 5. 架构原则
 
@@ -254,6 +259,8 @@ sequenceDiagram
 - **降级优先**：Agent 失败/超时/不支持 tool-calling 一律降级 `RagService.chat()`，主链路不挂。
 - **可观测**：每轮 tool 调用 2 条 `agent_trace` (start/done)，落库失败 catch + warn 不影响主链路。
 - **per-conversation 隔离**：kbId、chatId 均不暴露给 LLM（通过 ThreadLocal 注入）。
+
+> **修正说明（F-008）**：`可观测性` 实施补充 `springdoc-openapi`（`springdoc-openapi-starter-webmvc-ui` 引入 Swagger UI），与 `spring-boot-starter-actuator` 并存。前者提供 `/swagger-ui.html` API 文档，后者提供 `/actuator/health` 健康检查与 `/actuator/prometheus` 指标。
 
 ## 6. 视图交叉索引
 
